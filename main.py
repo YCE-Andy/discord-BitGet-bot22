@@ -56,7 +56,7 @@ def parse_message(content):
 @client.event
 async def on_ready():
     print(f"\u2705 Bot is online as {client.user}")
-    print("\ud83d\udd01 Starting bot loop...")
+    print("Starting bot loop...")
 
 @client.event
 async def on_message(message):
