@@ -4,14 +4,15 @@ import ccxt
 import asyncio
 import re
 import math
-from decimal import Decimal, ROUND_DOWN
 from dotenv import load_dotenv
 
+# Load environment variables
 load_dotenv()
 
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 RELAY_CHANNEL_ID = int(os.getenv("RELAY_CHANNEL_ID"))
 
+# Configure MEXC exchange
 exchange = ccxt.mexc({
     'apiKey': os.getenv("MEXC_API_KEY"),
     'secret': os.getenv("MEXC_SECRET_KEY"),
@@ -21,45 +22,48 @@ exchange = ccxt.mexc({
     }
 })
 
+# Set up Discord client with message content intent
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 
+# Parse trading signal
 def parse_message(content):
-    content = content.upper()
+    try:
+        content = content.upper()
 
-    symbol_match = re.search(r'^([A-Z]+USDT)', content)
-    symbol = symbol_match.group(1) if symbol_match else None
-    if symbol:
-        symbol = f"{symbol[:-4]}/USDT"
+        symbol_match = re.search(r'([A-Z]+USDT)', content)
+        symbol = symbol_match.group(1).replace("USDT", "") + "_USDT" if symbol_match else None
 
-    side = 'buy' if 'BUY' in content else 'sell' if 'SELL' in content else 'buy'
+        side = "buy" if "BUY" in content else "sell" if "SELL" in content else "buy"
 
-    stop_match = re.search(r'STOP\s*([\d.]+)', content)
-    stop_loss = float(stop_match.group(1)) if stop_match else None
+        stop_match = re.search(r'STOP\s*([\d.]+)', content)
+        stop_loss = float(stop_match.group(1)) if stop_match else None
 
-    targets_match = re.findall(r'(?:TARGETS?|^|\n)[\s:]*([\d.]+)', content)
-    targets = [float(t) for t in targets_match] if targets_match else []
+        targets = re.findall(r'TARGETS?.*?([\d.]+)', content, re.DOTALL)
+        targets = [float(t) for t in targets] if targets else []
 
-    leverage_match = re.search(r'LEVERAGE\s*x?(\d+)', content)
-    leverage = int(leverage_match.group(1)) if leverage_match else 100
+        leverage_match = re.search(r'LEVERAGE\s*[xX]?(\d+)', content)
+        leverage = int(leverage_match.group(1)) if leverage_match else 100  # Force x100 default
 
-    if not symbol:
+        return {
+            'symbol': symbol,
+            'side': side,
+            'stop_loss': stop_loss,
+            'targets': targets[:4],
+            'leverage': leverage
+        }
+    except Exception as e:
+        print(f"❌ Error parsing message: {e}")
         return None
 
-    return {
-        'symbol': symbol,
-        'side': side,
-        'stop_loss': stop_loss,
-        'targets': targets,
-        'leverage': leverage
-    }
-
+# On bot ready
 @client.event
 async def on_ready():
     print(f"✅ Bot is online as {client.user}")
     print("🔁 Starting bot loop...")
 
+# On new message
 @client.event
 async def on_message(message):
     if message.author == client.user:
@@ -67,55 +71,60 @@ async def on_message(message):
 
     print(f"🔍 Message received: {message.content} | Channel: {message.channel.id} | Author: {message.author}")
 
+    if message.channel.id != RELAY_CHANNEL_ID:
+        return
+
     trade = parse_message(message.content)
     if not trade:
         print("❌ Invalid message format: No pair found or parsing error")
         return
 
     try:
-        market = trade["symbol"]
+        symbol = trade["symbol"]
         side = trade["side"]
-        leverage = 100
-        notional = Decimal("200.00")
+        leverage = 100  # Always force x100 leverage
+        notional = 200  # Always use 200 USDT
 
         exchange.load_markets()
-        if market not in exchange.markets:
-            raise Exception(f"Market not found: {market}")
+        market_info = exchange.market(symbol)
+        price = exchange.fetch_ticker(symbol)['last']
 
-        market_info = exchange.market(market)
-        price = Decimal(str(exchange.fetch_ticker(market)['last']))
-        precision = market_info['precision']['amount']
-        min_qty = Decimal(str(market_info['limits']['amount']['min']))
+        if not price or price <= 0:
+            raise Exception(f"Invalid market price: {price}")
 
-        # Quantity = notional / price, then round down to allowed precision
+        # Determine precision
+        precision = market_info.get("precision", {}).get("amount", 0.0001)
+        precision_digits = abs(int(round(math.log10(precision)))) if isinstance(precision, float) else int(precision)
+
+        min_qty = market_info.get("limits", {}).get("amount", {}).get("min", 0.0001)
         raw_qty = notional / price
-        precision_digits = abs(int(math.log10(precision))) if isinstance(precision, float) else precision
-        quant_str = str(raw_qty.quantize(Decimal(f'1e-{precision_digits}'), rounding=ROUND_DOWN))
+        qty = max(round(raw_qty, precision_digits), min_qty)
 
-        quantity = Decimal(quant_str)
-        if quantity < min_qty:
-            quantity = min_qty
+        if qty <= 0:
+            raise Exception(f"Calculated quantity is zero or less. Qty: {qty}, Raw: {raw_qty}, Price: {price}")
 
-        if quantity <= 0:
-            raise Exception(f"Invalid quantity calculated: {quantity}")
+        print(f"🚀 Placing market order: {side.upper()} {qty} {symbol} @ {price} with x{leverage}")
 
-        print(f"🚀 Placing market order: {side.upper()} {quantity} {market.replace('/', '_')} @ {price} with x{leverage}")
+        # Set leverage with correct params
+        exchange.set_leverage(leverage, symbol, params={
+            "openType": 1,  # Isolated
+            "positionType": 1 if side == "buy" else 2  # Long or Short
+        })
 
-        order = exchange.create_order(
-            symbol=market,
-            type='market',
+        # Place order
+        order = exchange.create_market_order(
+            symbol=symbol,
             side=side,
-            amount=float(quantity),
-            price=None,
+            amount=qty,
             params={
-                'openType': 1,
-                'positionType': 1 if side == 'buy' else 2,
-                'leverage': leverage,
-                'positionSide': 'LONG' if side == 'buy' else 'SHORT'
+                "positionSide": "LONG" if side == "buy" else "SHORT",
+                "leverage": leverage,
+                "openType": 1,  # Isolated
+                "positionType": 1 if side == "buy" else 2
             }
         )
 
-        print(f"✅ Trade executed: {side.upper()} {quantity} {market} with x{leverage} leverage")
+        print(f"✅ Trade executed: {side.upper()} {qty} {symbol} with x{leverage} leverage")
 
     except Exception as e:
         print(f"❌ Error processing trade: {e}")
