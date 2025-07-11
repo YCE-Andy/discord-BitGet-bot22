@@ -19,6 +19,7 @@ exchange = ccxt.mexc({
         'defaultType': 'future',
     }
 })
+exchange.load_markets()  # ✅ This line loads the MEXC market data
 
 intents = discord.Intents.default()
 intents.message_content = True
