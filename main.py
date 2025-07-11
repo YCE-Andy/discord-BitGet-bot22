@@ -97,16 +97,15 @@ async def on_message(message):
         exchange.set_leverage(leverage, symbol)
 
         # ✅ Create the market order (no positionSide)
-        order = exchange.create_order(
-            symbol=symbol,
-            type='market',
-            side=side,
-            amount=qty_rounded,
-            params={
-                'openType': 1,  # Isolated
-                'positionType': 1 if side == 'buy' else 2,  # 1 = long, 2 = short
-            }
-        )
+       order = exchange.create_market_order(
+    symbol=symbol,
+    side=side,
+    amount=qty_rounded,
+    params={
+        'positionSide': 'LONG' if side == 'buy' else 'SHORT',
+        'leverage': leverage
+    }
+)
 
         order = exchange.create_market_order(
             symbol=symbol,
