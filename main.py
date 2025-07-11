@@ -72,19 +72,19 @@ async def on_message(message):
     try:
         market = trade["symbol"]
         side = trade["side"]
-        leverage = 100  # ✅ Force x100 leverage every time
+        leverage = 100  # Force x100 leverage
 
         exchange.load_markets()
         market_info = exchange.market(market)
         price = exchange.fetch_ticker(market)["last"]
-        notional = 200  # ✅ Always use 200 USDT
+        notional = 200  # Always use 200 USDT
 
         precision = market_info["precision"]["amount"]
-        if precision is None:
-            precision = 2  # fallback if not set
+        if precision is None or not isinstance(precision, int):
+            precision = 2  # fallback
 
         raw_qty = notional / price
-        qty_rounded = float(f"{raw_qty:.{precision}f}")
+        qty_rounded = round(raw_qty, precision)
 
         min_qty = market_info["limits"]["amount"]["min"] or 0.0001
         quantity = max(qty_rounded, min_qty)
