@@ -19,7 +19,6 @@ exchange = ccxt.mexc({
         'defaultType': 'future',
     }
 })
-exchange.load_markets()  # ✅ This line loads the MEXC market data
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -83,14 +82,16 @@ async def on_message(message):
         side = trade["side"]
         leverage = trade["leverage"]
 
-        # Get market details to calculate contract size
+        exchange.load_markets()
         market_info = exchange.market(market)
         price = exchange.fetch_ticker(market)["last"]
-        notional = 200  # Use 200 USDT per trade
-        quantity = max(
-    round(notional / price, int(market_info["precision"]["amount"])),
-    market_info["limits"]["amount"]["min"]
-)
+
+        notional = 200  # Amount in USDT per trade
+        precision = int(market_info["precision"]["amount"])
+        raw_qty = notional / price
+        qty_rounded = round(raw_qty, precision)
+        min_qty = market_info["limits"]["amount"]["min"]
+        quantity = max(qty_rounded, min_qty)
 
         order = exchange.create_market_order(
             symbol=market,
