@@ -109,7 +109,8 @@ async def on_message(message):
     params={
         'openType': 1,
         'positionType': 1 if side == 'buy' else 2,
-        'positionSide': 'LONG' if side == 'buy' else 'SHORT'
+        'positionSide': 'LONG' if side == 'buy' else 'SHORT',
+        'leverage': leverage  # <- ✅ REQUIRED for isolated margin
     }
 )
 
