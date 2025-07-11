@@ -1,78 +1,83 @@
 import os
-import discord
-import asyncio
 import re
-from discord.ext import commands
-from mexc_sdk import Spot  # pip install mexc-sdk
+import discord
+from dotenv import load_dotenv
+from mexc_sdk import Futures
 
-# Load environment variables
+load_dotenv()
+
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 SOURCE_CHANNEL_ID = int(os.getenv("SOURCE_CHANNEL_ID"))
-TARGET_CHANNEL_ID = int(os.getenv("TARGET_CHANNEL_ID"))
+RELAY_CHANNEL_ID = int(os.getenv("RELAY_CHANNEL_ID"))
+
 MEXC_API_KEY = os.getenv("MEXC_API_KEY")
 MEXC_SECRET_KEY = os.getenv("MEXC_SECRET_KEY")
 
-# Constants
-TRADE_AMOUNT_USDT = 200
-TP_SPLITS = [0.25, 0.40, 0.25, 0.10]  # Percentage splits for 4 take profits
-MAX_TP_COUNT = 4  # Only use the first 4 take profit levels
-
-# Setup bot
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+client = discord.Client(intents=intents)
 
-# Setup MEXC client
-client = Spot(key=MEXC_API_KEY, secret=MEXC_SECRET_KEY)
+futures_client = Futures(api_key=MEXC_API_KEY, api_secret=MEXC_SECRET_KEY)
 
-@bot.event
+@client.event
 async def on_ready():
-    print(f"✅ Bot connected as {bot.user}")
+    print(f"Logged in as {client.user.name}")
 
-@bot.event
+@client.event
 async def on_message(message):
     if message.channel.id != SOURCE_CHANNEL_ID or message.author.bot:
         return
 
-    content = message.content.upper()
+    try:
+        content = message.content
+        # Example signal format:
+        # KAITOUSDT
+        # Entry: 1.50
+        # Stop Loss: 1.43
+        # Targets: 1.54, 1.58, 1.62, 1.64
 
-    match = re.search(r'^([A-Z]+USDT)', content)
-    if not match:
-        return
+        symbol_match = re.search(r"([A-Z]+USDT)", content)
+        entry_match = re.search(r"Entry[:\- ]*\$?([\d\.]+)", content, re.IGNORECASE)
+        stop_match = re.search(r"Stop\s*Loss[:\- ]*\$?([\d\.]+)", content, re.IGNORECASE)
+        targets_match = re.findall(r"1\.\d{2}", content)
 
-    symbol = match.group(1)
-    leverage_match = re.search(r'LEVERAGE\s*X?(\d+)', content)
-    leverage = int(leverage_match.group(1)) if leverage_match else 1
+        if not (symbol_match and entry_match and stop_match and len(targets_match) >= 1):
+            print("Message does not match expected trade format")
+            return
 
-    buyzone_match = re.search(r'BUYZONE\s*([\d.]+)\s*-\s*([\d.]+)', content)
-    buy_price = float(buyzone_match.group(2)) if buyzone_match else None
+        symbol = symbol_match.group(1)
+        entry_price = float(entry_match.group(1))
+        stop_loss = float(stop_match.group(1))
+        targets = [float(t) for t in targets_match[:4]]  # Only use first 4 targets
 
-    stop_match = re.search(r'STOP\s*([\d.]+)', content)
-    stop_loss = float(stop_match.group(1)) if stop_match else None
+        usdt_amount = 200
+        leverage = 1  # We'll use full leverage allowed in next step
 
-    target_matches = re.findall(r'(?<=^|\n)([\d.]{3,})', content)
-    targets = [float(tp) for tp in target_matches if stop_loss is None or float(tp) > stop_loss]
-    targets = targets[:MAX_TP_COUNT]
+        # Get current price for qty calculation
+        ticker = futures_client.get_ticker_price(symbol=symbol)
+        current_price = float(ticker["price"])
+        quantity = round(usdt_amount / current_price, 3)
 
-    # Execute trade if everything needed is present
-    if buy_price and stop_loss and targets:
-        try:
-            order = client.order(symbol=symbol, side="BUY", type="MARKET", quoteOrderQty=TRADE_AMOUNT_USDT)
-            print(f"✅ Market order placed for {symbol}: {order}")
+        # Set leverage
+        futures_client.change_leverage(symbol=symbol, leverage=leverage)
 
-            # Send Discord confirmation
-            target_channel = bot.get_channel(TARGET_CHANNEL_ID)
-            if target_channel:
-                tp_msg = "\n".join([f"TP{i+1}: {tp} ({int(TP_SPLITS[i]*100)}%)" for i, tp in enumerate(targets)])
-                confirmation = (
-                    f"✅ Trade executed for **{symbol}** on MEXC\n"
-                    f"• **Buy Amount**: ${TRADE_AMOUNT_USDT}\n"
-                    f"• **Leverage**: x{leverage}\n"
-                    f"• **Buy Price**: ~{buy_price}\n"
-                    f"• **Stop Loss**: {stop_loss}\n"
-                    f"• **Take Profits**:\n{tp_msg}"
-                )
-                await target_channel.send(confirmation)
-        except Exception as e:
-            print(f"❌ Trade failed: {e}")
-            await bot.get_channel(TARGET_CHANNEL_ID).send(f"❌ Trade failed for {symbol}: {e}")
+        # Place market order
+        order = futures_client.place_order(
+            symbol=symbol,
+            price=None,
+            vol=quantity,
+            side=1,  # 1 = open long
+            type=1,  # 1 = market
+            open_type="isolated",
+            position_id=0,
+            leverage=leverage,
+            external_oid="discord_trade_" + str(message.id),
+            stop_loss_price=stop_loss,
+            take_profit_price=targets[0]
+        )
+
+        print(f"Trade executed: {order}")
+    except Exception as e:
+        print(f"Error: {e}")
+
+client.run(DISCORD_BOT_TOKEN)
