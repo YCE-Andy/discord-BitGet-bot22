@@ -86,7 +86,7 @@ async def on_message(message):
         min_qty = market_info.get("limits", {}).get("amount", {}).get("min", 0.0001)
 
         raw_qty = notional / price
-        quantity = round(max(raw_qty, min_qty), precision)
+        quantity = round(max(raw_qty, min_qty), int(precision))
 
         if quantity <= 0:
             raise Exception(f"Invalid quantity: {quantity}")
