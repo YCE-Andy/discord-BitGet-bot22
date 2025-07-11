@@ -1,30 +1,30 @@
-import os
 import discord
-from discord.ext import commands
-from dotenv import load_dotenv
-
-load_dotenv()
-
-TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-SOURCE_CHANNEL_ID = int(os.getenv("SOURCE_CHANNEL_ID"))
-RELAY_CHANNEL_ID = int(os.getenv("RELAY_CHANNEL_ID"))
+import os
+import asyncio
 
 intents = discord.Intents.default()
-intents.messages = True
 intents.message_content = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+client = discord.Client(intents=intents)
 
-@bot.event
+# Load environment variables safely
+try:
+    DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+    SOURCE_CHANNEL_ID = int(os.getenv("SOURCE_CHANNEL_ID", "0").strip())
+    TARGET_CHANNEL_ID = int(os.getenv("TARGET_CHANNEL_ID", "0").strip())
+except Exception as e:
+    print(f"[ERROR] Failed to load environment variables: {e}")
+    exit(1)
+
+@client.event
 async def on_ready():
-    print(f"Bot is ready. Logged in as {{bot.user}}")
+    print(f'Logged in as {client.user}! Bot is ready.')
 
-@bot.event
+@client.event
 async def on_message(message):
     if message.channel.id == SOURCE_CHANNEL_ID and not message.author.bot:
-        relay_channel = bot.get_channel(RELAY_CHANNEL_ID)
-        if relay_channel:
-            await relay_channel.send(f"**{message.author.display_name}**: {message.content}")
-    await bot.process_commands(message)
+        target_channel = client.get_channel(TARGET_CHANNEL_ID)
+        if target_channel:
+            await target_channel.send(f"[Relay] {message.content}")
 
-bot.run(TOKEN)
+client.run(DISCORD_BOT_TOKEN)
