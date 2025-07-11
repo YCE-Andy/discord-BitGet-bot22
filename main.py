@@ -110,7 +110,7 @@ async def on_message(message):
             }
         )
 
-        order = exchange.create_market_order(
+               order = exchange.create_market_order(
             symbol=market,
             side=side,
             amount=qty_rounded,
@@ -124,5 +124,7 @@ async def on_message(message):
 
     except Exception as e:
         print(f"❌ Error processing trade: {e}")
+        if hasattr(e, 'args') and isinstance(e.args[0], dict):
+            print("📦 MEXC error response:", e.args[0])
 
 client.run(DISCORD_BOT_TOKEN)
