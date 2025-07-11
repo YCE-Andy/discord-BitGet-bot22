@@ -1,36 +1,29 @@
 import os
-import re
-import json
-import asyncio
-import aiohttp
 import discord
+import asyncio
+import re
 from discord.ext import commands
+from mexc_sdk import Spot  # pip install mexc-sdk
 
-# -----------------------------
-# ENVIRONMENT CONFIGURATION
-# -----------------------------
+# Load environment variables
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 SOURCE_CHANNEL_ID = int(os.getenv("SOURCE_CHANNEL_ID"))
+TARGET_CHANNEL_ID = int(os.getenv("TARGET_CHANNEL_ID"))
+MEXC_API_KEY = os.getenv("MEXC_API_KEY")
+MEXC_SECRET_KEY = os.getenv("MEXC_SECRET_KEY")
 
-MEXC_API_KEY = "mx0vgl8TX4NFHVkxc1"
-MEXC_SECRET_KEY = "0cc08527b18a48b1b83f4eba07935350"
-
-# -----------------------------
-# MEXC TRADING CONFIGURATION
-# -----------------------------
-TRADE_SYMBOL = None  # will be updated from signal
+# Constants
 TRADE_AMOUNT_USDT = 200
-LEVERAGE = 100
+TP_SPLITS = [0.25, 0.40, 0.25, 0.10]  # Percentage splits for 4 take profits
+MAX_TP_COUNT = 4  # Only use the first 4 take profit levels
 
-# Example TP Split: 25%, 40%, 25%, 10%
-TP_SPLIT = [0.25, 0.4, 0.25, 0.1]
-
-# -----------------------------
-# DISCORD BOT SETUP
-# -----------------------------
+# Setup bot
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+# Setup MEXC client
+client = Spot(key=MEXC_API_KEY, secret=MEXC_SECRET_KEY)
 
 @bot.event
 async def on_ready():
@@ -38,88 +31,48 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
-    if message.channel.id != SOURCE_CHANNEL_ID:
+    if message.channel.id != SOURCE_CHANNEL_ID or message.author.bot:
         return
 
     content = message.content.upper()
 
-    # Signal parsing logic
-    match = re.search(r"(\w+USDT).*?BUYZONE.*?(\d+\.\d+).*?-.*?(\d+\.\d+).*?STOP.*?(\d+\.\d+).*?LEVERAGE.*?X(\d+).*?TARGETS(.*?)\Z", content, re.DOTALL)
+    match = re.search(r'^([A-Z]+USDT)', content)
     if not match:
-        print("❌ Could not parse message.")
         return
 
     symbol = match.group(1)
-    buy_min = float(match.group(2))
-    buy_max = float(match.group(3))
-    stop_loss = float(match.group(4))
-    leverage = int(match.group(5))
-    targets_text = match.group(6).strip()
+    leverage_match = re.search(r'LEVERAGE\s*X?(\d+)', content)
+    leverage = int(leverage_match.group(1)) if leverage_match else 1
 
-    target_prices = re.findall(r"\d+\.\d+", targets_text)
-    target_prices = [float(p) for p in target_prices[:4]]  # Ignore any 5th or more
+    buyzone_match = re.search(r'BUYZONE\s*([\d.]+)\s*-\s*([\d.]+)', content)
+    buy_price = float(buyzone_match.group(2)) if buyzone_match else None
 
-    print(f"📈 Parsed Trade Signal: {symbol} at zone {buy_min}-{buy_max}, TP: {target_prices}, SL: {stop_loss}, Lev: x{leverage}")
+    stop_match = re.search(r'STOP\s*([\d.]+)', content)
+    stop_loss = float(stop_match.group(1)) if stop_match else None
 
-    await execute_trade(symbol, buy_max, stop_loss, target_prices, leverage)
+    target_matches = re.findall(r'(?<=^|\n)([\d.]{3,})', content)
+    targets = [float(tp) for tp in target_matches if stop_loss is None or float(tp) > stop_loss]
+    targets = targets[:MAX_TP_COUNT]
 
-# -----------------------------
-# MEXC TRADE EXECUTION
-# -----------------------------
-async def execute_trade(symbol, entry_price, stop_loss, targets, leverage):
-    base_url = "https://contract.mexc.com"
-    headers = {
-        "Content-Type": "application/json",
-        "ApiKey": MEXC_API_KEY
-    }
+    # Execute trade if everything needed is present
+    if buy_price and stop_loss and targets:
+        try:
+            order = client.order(symbol=symbol, side="BUY", type="MARKET", quoteOrderQty=TRADE_AMOUNT_USDT)
+            print(f"✅ Market order placed for {symbol}: {order}")
 
-    # Build signature (MEXC-specific, simplified for demo)
-    async with aiohttp.ClientSession() as session:
-        # 1. Set leverage
-        lev_payload = {
-            "symbol": symbol,
-            "leverage": leverage,
-            "positionOpenType": 1
-        }
-        async with session.post(base_url + "/api/v1/private/position/change-leverage", json=lev_payload, headers=headers) as resp:
-            print("Leverage response:", await resp.text())
-
-        # 2. Place market order (long)
-        trade_payload = {
-            "symbol": symbol,
-            "price": 0,  # market order
-            "vol": TRADE_AMOUNT_USDT,
-            "leverage": leverage,
-            "side": 1,  # 1 = Buy Long
-            "type": 1,  # 1 = Market
-            "openType": 1,
-            "positionId": 0,
-            "externalOid": os.urandom(6).hex(),
-            "stopLossPrice": stop_loss
-        }
-
-        async with session.post(base_url + "/api/v1/private/order/submit", json=trade_payload, headers=headers) as resp:
-            order_response = await resp.text()
-            print("📤 Trade response:", order_response)
-
-        # 3. (Optional) Place limit orders for TPs at % allocation
-        for i, tp_price in enumerate(targets):
-            tp_vol = round(TRADE_AMOUNT_USDT * TP_SPLIT[i], 2)
-            tp_payload = {
-                "symbol": symbol,
-                "price": tp_price,
-                "vol": tp_vol,
-                "leverage": leverage,
-                "side": 2,  # 2 = Sell to Close
-                "type": 1,  # Market
-                "openType": 1,
-                "positionId": 0,
-                "externalOid": os.urandom(6).hex()
-            }
-            async with session.post(base_url + "/api/v1/private/order/submit", json=tp_payload, headers=headers) as tp_resp:
-                print(f"🎯 TP{i+1} response:", await tp_resp.text())
-
-# -----------------------------
-# RUN BOT
-# -----------------------------
-bot.run(DISCORD_BOT_TOKEN)
+            # Send Discord confirmation
+            target_channel = bot.get_channel(TARGET_CHANNEL_ID)
+            if target_channel:
+                tp_msg = "\n".join([f"TP{i+1}: {tp} ({int(TP_SPLITS[i]*100)}%)" for i, tp in enumerate(targets)])
+                confirmation = (
+                    f"✅ Trade executed for **{symbol}** on MEXC\n"
+                    f"• **Buy Amount**: ${TRADE_AMOUNT_USDT}\n"
+                    f"• **Leverage**: x{leverage}\n"
+                    f"• **Buy Price**: ~{buy_price}\n"
+                    f"• **Stop Loss**: {stop_loss}\n"
+                    f"• **Take Profits**:\n{tp_msg}"
+                )
+                await target_channel.send(confirmation)
+        except Exception as e:
+            print(f"❌ Trade failed: {e}")
+            await bot.get_channel(TARGET_CHANNEL_ID).send(f"❌ Trade failed for {symbol}: {e}")
