@@ -1,6 +1,7 @@
 import os
 import discord
 import ccxt
+import asyncio
 import re
 from dotenv import load_dotenv
 
@@ -9,6 +10,7 @@ load_dotenv()
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 RELAY_CHANNEL_ID = int(os.getenv("RELAY_CHANNEL_ID"))
 
+# Configure MEXC exchange with credentials
 exchange = ccxt.mexc({
     'apiKey': os.getenv("MEXC_API_KEY"),
     'secret': os.getenv("MEXC_SECRET_KEY"),
@@ -75,25 +77,20 @@ async def on_message(message):
         exchange.load_markets()
         market_info = exchange.market(market)
         price = exchange.fetch_ticker(market)["last"]
-        notional = 200  # Fixed amount in USDT
+        notional = 200  # Always use $200 USDT
 
-        # Precision fallback fix
         precision = market_info["precision"]["amount"]
         if precision is None or not isinstance(precision, int):
-            precision = 4
+            precision = 2  # Fallback precision
 
-        # Calculate quantity
         raw_qty = notional / price
         qty_rounded = round(raw_qty, precision)
 
-        min_qty = market_info["limits"]["amount"]["min"]
-        if min_qty is None:
-            min_qty = 0.0001  # fallback
-
+        min_qty = market_info["limits"]["amount"]["min"] or 0.0001
         quantity = max(qty_rounded, min_qty)
 
         if quantity <= 0:
-            raise Exception(f"❌ Calculated quantity is zero or negative: {quantity}")
+            raise Exception(f"Calculated quantity is zero or negative: {quantity}")
 
         order = exchange.create_market_order(
             symbol=market,
