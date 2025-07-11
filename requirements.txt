@@ -1,3 +1,2 @@
 discord.py
 python-dotenv
-git+https://github.com/MEXCofficial/mexc-api-sdk-python.git
