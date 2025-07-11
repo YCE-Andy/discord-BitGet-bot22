@@ -103,13 +103,15 @@ async def on_message(message):
         )
 
         order = exchange.create_market_order(
-            symbol=market,
-            side=side,
-            amount=quantity,
-            params={
-                'positionSide': 'LONG' if side == 'buy' else 'SHORT'
-            }
-        )
+    symbol=market,
+    side=side,
+    amount=quantity,
+    params={
+        'openType': 1,
+        'positionType': 1 if side == 'buy' else 2,
+        'positionSide': 'LONG' if side == 'buy' else 'SHORT'
+    }
+)
 
         print(f"✅ Trade executed: {side.upper()} {quantity} {market} with x{leverage} leverage")
 
