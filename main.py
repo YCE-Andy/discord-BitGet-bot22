@@ -16,7 +16,7 @@ exchange = ccxt.mexc({
     'secret': os.getenv("MEXC_SECRET_KEY"),
     'enableRateLimit': True,
     'options': {
-        'defaultType': 'swap',  # ✅ Use futures (USDT-M)
+        'defaultType': 'swap',
     }
 })
 
@@ -33,10 +33,12 @@ def parse_message(content):
         if not base:
             return None
 
-        symbol = f"{base}/USDT:USDT"  # ✅ Proper format for MEXC USDT-M futures
+        symbol = f"{base}/USDT:USDT"
         side = 'buy' if 'BUY' in content else 'sell'
+
         stop_match = re.search(r'STOP\s*([\d.]+)', content)
         stop = float(stop_match.group(1)) if stop_match else None
+
         targets_match = re.findall(r'(?:TARGETS?|^|\n)[\s:]*([\d.]+)', content)
         targets = [float(t) for t in targets_match] if targets_match else []
 
@@ -100,17 +102,16 @@ async def on_message(message):
 
         print(f"🚀 Placing market order: {side.upper()} {qty_rounded} {market} @ {price} with x{leverage}")
 
-        # ✅ Set leverage with required openType and positionType
         exchange.set_leverage(
             leverage,
             market,
             params={
-                'openType': 1,  # Isolated
-                'positionType': 1 if side == 'buy' else 2  # 1 = long, 2 = short
+                'openType': 1,
+                'positionType': 1 if side == 'buy' else 2
             }
         )
 
-               order = exchange.create_market_order(
+        order = exchange.create_market_order(
             symbol=market,
             side=side,
             amount=qty_rounded,
