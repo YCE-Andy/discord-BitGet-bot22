@@ -90,30 +90,20 @@ async def on_message(message):
         qty = max(notional / price, min_qty)
         qty_rounded = round(qty, precision_digits)
 
-                # ✅ Strip unsupported parameters
         print(f"🚀 Placing market order: {side.upper()} {qty_rounded} {symbol} @ {price} with x{leverage}")
 
         # ✅ Set leverage
         exchange.set_leverage(leverage, symbol)
 
-        # ✅ Create the market order (no positionSide)
-       order = exchange.create_market_order(
-    symbol=symbol,
-    side=side,
-    amount=qty_rounded,
-    params={
-        'positionSide': 'LONG' if side == 'buy' else 'SHORT',
-        'leverage': leverage
-    }
-)
-
-        order = exchange.create_market_order(
+        # ✅ Create the market order (only once)
+        order = exchange.create_order(
             symbol=symbol,
+            type='market',
             side=side,
             amount=qty_rounded,
             params={
-                'positionSide': 'LONG' if side == 'buy' else 'SHORT',
-                'leverage': leverage
+                'openType': 1,  # Isolated
+                'positionType': 1 if side == 'buy' else 2  # 1 = long, 2 = short
             }
         )
 
