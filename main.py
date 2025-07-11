@@ -84,15 +84,19 @@ async def on_message(message):
 
         exchange.load_markets()
         market_info = exchange.market(market)
-        price = exchange.fetch_ticker(market)["last"]
-
+                price = exchange.fetch_ticker(market)["last"]
         notional = 200  # Amount in USDT per trade
-        precision = int(market_info["precision"]["amount"])
+
+        precision = market_info["precision"]["amount"]
+        if not isinstance(precision, int):
+            precision = 2  # fallback if float or None
+
         raw_qty = notional / price
         qty_rounded = round(raw_qty, precision)
-        min_qty = market_info["limits"]["amount"]["min"]
-        quantity = max(qty_rounded, min_qty)
 
+        min_qty = market_info["limits"]["amount"]["min"] or 0.0001
+        quantity = max(qty_rounded, min_qty)
+        
         order = exchange.create_market_order(
             symbol=market,
             side=side,
