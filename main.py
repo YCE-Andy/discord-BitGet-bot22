@@ -1,50 +1,47 @@
 import os
 import discord
 import ccxt
-import asyncio
 import re
 import math
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 RELAY_CHANNEL_ID = int(os.getenv("RELAY_CHANNEL_ID"))
 
-# Setup MEXC exchange client
+# Configure MEXC Futures
 exchange = ccxt.mexc({
     'apiKey': os.getenv("MEXC_API_KEY"),
     'secret': os.getenv("MEXC_SECRET_KEY"),
     'enableRateLimit': True,
     'options': {
-        'defaultType': 'future',
+        'defaultType': 'future',  # IMPORTANT: This is required for futures
     }
 })
 
-# Setup Discord bot
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-# Signal parser
-def parse_signal(msg):
+def parse_message(content):
     try:
-        msg = msg.upper()
-        symbol_match = re.search(r'([A-Z]+USDT)', msg)
-        symbol = symbol_match.group(1) + "_USDT" if symbol_match else None
-        targets = re.findall(r'\b\d+\.\d+\b', msg)
-        stop_match = re.search(r'STOP\s*([\d.]+)', msg)
-        stop = float(stop_match.group(1)) if stop_match else None
-        side = "buy" if "BUY" in msg else "sell"
+        content = content.upper()
+        symbol_match = re.search(r'([A-Z]+USDT)', content)
+        symbol = symbol_match.group(1) if symbol_match else None
+        side = 'buy' if 'BUY' in content else 'sell' if 'SELL' in content else 'buy'
+        stop_match = re.search(r'STOP\s*([\d.]+)', content)
+        stop_loss = float(stop_match.group(1)) if stop_match else None
+        targets = re.findall(r'(?:TARGETS?|^|\n)[\s:]*([\d.]+)', content)
+        targets = [float(t) for t in targets] if targets else []
         return {
-            "symbol": symbol,
-            "side": side,
-            "targets": targets,
-            "stop": stop
+            'symbol': symbol,
+            'side': side,
+            'stop_loss': stop_loss,
+            'targets': targets
         } if symbol else None
     except Exception as e:
-        print(f"❌ Parse error: {e}")
+        print(f"❌ Error parsing message: {e}")
         return None
 
 @client.event
@@ -58,71 +55,56 @@ async def on_message(message):
         return
 
     print(f"🔍 Message received: {message.content} | Channel: {message.channel.id} | Author: {message.author}")
-    trade = parse_signal(message.content)
 
+    if message.channel.id != RELAY_CHANNEL_ID:
+        return
+
+    trade = parse_message(message.content)
     if not trade:
         print("❌ Invalid message format: No pair found or parsing error")
         return
 
     try:
-        symbol = trade["symbol"]
+        market = trade["symbol"]
         side = trade["side"]
-        leverage = 100  # FORCE LEVERAGE x100
-        notional = 200  # FIXED TRADE SIZE
+        leverage = 100
+        notional = 200
 
-        # Validate market
         exchange.load_markets()
-        if symbol not in exchange.markets:
-            raise Exception(f"Market {symbol} not found on MEXC")
+        if market not in exchange.markets:
+            raise Exception(f"Market {market} not found on MEXC")
 
-        market_info = exchange.market(symbol)
-        ticker = exchange.fetch_ticker(symbol)
-        price = ticker.get("last")
+        market_info = exchange.market(market)
+        price = exchange.fetch_ticker(market)["last"]
+        if not price or price <= 0:
+            raise Exception(f"Invalid price for {market}")
 
-        if price is None or price <= 0:
-            raise Exception(f"Invalid price for {symbol}: {price}")
-
-        # Precision
-        precision_val = market_info.get("precision", {}).get("amount", 0.0001)
-        precision_digits = abs(int(math.log10(precision_val))) if isinstance(precision_val, float) else int(precision_val)
-
-        # Min quantity
+        precision = market_info.get("precision", {}).get("amount", 0.0001)
+        precision_digits = abs(int(math.log10(precision))) if isinstance(precision, float) else 4
         min_qty = market_info.get("limits", {}).get("amount", {}).get("min", 0.0001)
 
-        # Quantity calc
         raw_qty = notional / price
-        quantity = round(max(raw_qty, min_qty), precision_digits)
+        qty = round(max(raw_qty, min_qty), precision_digits)
 
-        if quantity <= 0:
-            raise Exception(f"Quantity calculation error: {quantity} for {symbol} at price {price}")
+        if qty <= 0:
+            raise Exception(f"Final quantity invalid: {qty}")
 
-        print(f"🚀 Placing market order: {side.upper()} {quantity} {symbol} @ {price} with x{leverage}")
+        print(f"🚀 Placing market order: {side.upper()} {qty} {market} @ {price} with x{leverage}")
 
-        # Set leverage (required format for MEXC futures)
-        exchange.set_leverage(
-            leverage,
-            symbol,
-            params={
-                "openType": 1,  # Isolated
-                "positionType": 1 if side == "buy" else 2  # 1=Long, 2=Short
-            }
-        )
-
-        # Execute market order
         order = exchange.create_market_order(
-            symbol=symbol,
+            symbol=market,
             side=side,
-            amount=quantity,
+            amount=qty,
             params={
-                "positionSide": "LONG" if side == "buy" else "SHORT",
-                "leverage": leverage
+                'positionSide': 'LONG' if side == 'buy' else 'SHORT',
+                'leverage': leverage,
+                'openType': 1,  # 1 = isolated margin
+                'positionType': 1 if side == 'buy' else 2  # 1 = long, 2 = short
             }
         )
 
-        print(f"✅ Trade executed: {side.upper()} {quantity} {symbol} with x{leverage} leverage")
-
+        print(f"✅ Trade executed: {side.upper()} {qty} {market} with x{leverage} leverage")
     except Exception as e:
         print(f"❌ Error processing trade: {e}")
 
-# Run bot
 client.run(DISCORD_BOT_TOKEN)
