@@ -74,4 +74,9 @@ async def on_message(message):
     except Exception as e:
         print(f"❌ Error processing trade: {e}")
 
-client.run(DISCORD_BOT_TOKEN)
+if __name__ == "__main__":
+    try:
+        print("🔁 Starting bot loop...")
+        client.run(DISCORD_BOT_TOKEN)
+    except Exception as e:
+        print(f"❌ Bot crashed: {e}")
