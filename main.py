@@ -50,31 +50,31 @@ def parse_message(content):
             'leverage': leverage
         }
     except Exception as e:
-        print(f"\u274c Error parsing message: {e}")
+        print(f"[ERROR] Failed to parse message: {e}")
         return None
 
 @client.event
 async def on_ready():
-    print(f"\u2705 Bot is online as {client.user}")
-    print("Starting bot loop...")
+    print(f"[READY] Bot is online as {client.user}")
+    print("[INFO] Bot loop started")
 
 @client.event
 async def on_message(message):
     if message.author == client.user or message.channel.id != RELAY_CHANNEL_ID:
         return
 
-    print(f"\ud83d\udd0d Message received: {message.content} | Channel: {message.channel.id} | Author: {message.author}")
-
+    print(f"[MESSAGE] {message.content.strip()} | From: {message.author} | Channel: {message.channel.id}")
     trade = parse_message(message.content)
+
     if not trade:
-        print("\u274c Invalid message format or symbol")
+        print("[WARNING] Message not parsed or symbol not found")
         return
 
     try:
         symbol = trade["symbol"]
         side = trade["side"]
         leverage = trade["leverage"]
-        notional = 200
+        notional = 200  # USDT per trade
 
         exchange.load_markets()
         if symbol not in exchange.markets:
@@ -90,32 +90,34 @@ async def on_message(message):
         qty = max(notional / price, min_qty)
         qty_rounded = round(qty, precision_digits)
 
-        print(f"\ud83d\ude80 Placing market order: {side.upper()} {qty_rounded} {symbol} @ {price} with x{leverage}")
+        print(f"[ORDER] {side.upper()} {qty_rounded} {symbol} @ {price} (x{leverage})")
 
-        # Set leverage with openType and positionType
+        # Set leverage with correct parameters
         exchange.set_leverage(
             leverage,
             symbol,
             params={
-                'openType': 1,
-                'positionType': 1 if side == 'buy' else 2
+                'openType': 1,  # Isolated
+                'positionType': 1 if side == 'buy' else 2  # 1 = Long, 2 = Short
             }
         )
 
+        # Create market order
         order = exchange.create_market_order(
             symbol=symbol,
             side=side,
             amount=qty_rounded,
             params={
+                'positionSide': 'LONG' if side == 'buy' else 'SHORT',
                 'leverage': leverage
             }
         )
 
-        print(f"\u2705 Trade executed: {side.upper()} {qty_rounded} {symbol} with x{leverage} leverage")
+        print(f"[SUCCESS] Trade executed: {side.upper()} {qty_rounded} {symbol} x{leverage}")
 
     except Exception as e:
-        print(f"\u274c Error processing trade: {e}")
+        print(f"[ERROR] Trade failed: {e}")
         if hasattr(e, 'args') and isinstance(e.args[0], dict):
-            print("\ud83d\udce6 MEXC error response:", e.args[0])
+            print("[MEXC] Error Response:", e.args[0])
 
 client.run(DISCORD_BOT_TOKEN)
