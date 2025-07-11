@@ -73,24 +73,31 @@ async def on_message(message):
         market = trade["symbol"]
         side = trade["side"]
         leverage = 100  # Force x100 leverage
+        notional = 200  # Always use 200 USDT
 
         exchange.load_markets()
         market_info = exchange.market(market)
-        price = exchange.fetch_ticker(market)["last"]
-        notional = 200  # Always use $200 USDT
+        ticker = exchange.fetch_ticker(market)
+        price = ticker.get("last")
 
-        precision = market_info["precision"]["amount"]
-        if precision is None or not isinstance(precision, int):
-            precision = 2  # Fallback precision
+        if price is None or price <= 0:
+            raise Exception(f"Invalid market price: {price}")
+
+        precision = market_info.get("precision", {}).get("amount", 2)
+        if not isinstance(precision, int):
+            precision = 2
 
         raw_qty = notional / price
         qty_rounded = round(raw_qty, precision)
 
-        min_qty = market_info["limits"]["amount"]["min"] or 0.0001
+        min_qty = market_info.get("limits", {}).get("amount", {}).get("min", 0.0001)
+        if min_qty is None or min_qty <= 0:
+            min_qty = 0.0001
+
         quantity = max(qty_rounded, min_qty)
 
         if quantity <= 0:
-            raise Exception(f"Calculated quantity is zero or negative: {quantity}")
+            raise Exception(f"Final quantity invalid (<= 0): raw={raw_qty}, rounded={qty_rounded}, min={min_qty}")
 
         order = exchange.create_market_order(
             symbol=market,
