@@ -93,17 +93,25 @@ async def on_message(message):
 
         print(f"🚀 Placing market order: {side.upper()} {quantity} {market} @ {price} with x{leverage}")
 
-        # Set leverage
-        exchange.set_leverage(leverage, market)
+       # Set leverage with required MEXC params
+exchange.set_leverage(
+    leverage,
+    market,
+    params={
+        'openType': 1,  # 1 = Isolated
+        'positionType': 1 if side == 'buy' else 2  # 1 = Long, 2 = Short
+    }
+)
 
-        order = exchange.create_market_order(
-            symbol=market,
-            side=side,
-            amount=quantity,
-            params={
-                'positionSide': 'LONG' if side == 'buy' else 'SHORT'
-            }
-        )
+# Execute market order
+order = exchange.create_market_order(
+    symbol=market,
+    side=side,
+    amount=quantity,
+    params={
+        'positionSide': 'LONG' if side == 'buy' else 'SHORT'
+    }
+)
 
         print(f"✅ Trade executed: {side.upper()} {quantity} {market} with x{leverage} leverage")
 
