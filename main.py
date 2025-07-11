@@ -31,7 +31,7 @@ def parse_message(content):
         symbol_match = re.search(r'^([A-Z]+USDT)', content)
         symbol = symbol_match.group(1) if symbol_match else None
         if symbol:
-            symbol = f"{symbol[:-4]}/USDT"
+            symbol = f"{symbol[:-4]}_USDT"
 
         side = 'buy' if 'BUY' in content else 'sell' if 'SELL' in content else 'buy'
 
