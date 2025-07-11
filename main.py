@@ -87,7 +87,7 @@ async def on_message(message):
         market_info = exchange.market(market)
         price = exchange.fetch_ticker(market)["last"]
         notional = 200  # Use 200 USDT per trade
-        quantity = round(notional / price, market_info["precision"]["amount"])
+        quantity = round(notional / price, int(market_info["precision"]["amount"]))
 
         order = exchange.create_market_order(
             symbol=market,
