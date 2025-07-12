@@ -1,95 +1,127 @@
 import os
-import re
 import discord
-from discord.ext import commands
+import ccxt.async_support as ccxt
+import asyncio
+import re
+import math
 from dotenv import load_dotenv
-import ccxt
 
 load_dotenv()
 
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 RELAY_CHANNEL_ID = int(os.getenv("RELAY_CHANNEL_ID"))
-MEXC_API_KEY = os.getenv("MEXC_API_KEY")
-MEXC_SECRET_KEY = os.getenv("MEXC_SECRET_KEY")
+
+exchange = ccxt.mexc({
+    'apiKey': os.getenv("MEXC_API_KEY"),
+    'secret': os.getenv("MEXC_SECRET_KEY"),
+    'enableRateLimit': True,
+    'options': {
+        'defaultType': 'swap'  # USDT-M futures
+    }
+})
 
 intents = discord.Intents.default()
-intents.messages = True
 intents.message_content = True
+client = discord.Client(intents=intents)
 
-client = commands.Bot(command_prefix="!", intents=intents)
+def parse_message(content):
+    try:
+        content = content.upper()
+        symbol_match = re.search(r'^([A-Z]+USDT)', content)
+        base = symbol_match.group(1).replace("USDT", "") if symbol_match else None
+        if not base:
+            return None
+
+        symbol = f"{base}/USDT:USDT"
+        side = 'buy' if 'BUY' in content else 'sell'
+
+        stop_match = re.search(r'STOP\s*([\d.]+)', content)
+        stop = float(stop_match.group(1)) if stop_match else None
+
+        targets_raw = re.findall(r'(?:TARGETS?|^|\n)[\s:]*([\d.]+)', content)
+        targets = []
+        for t in targets_raw:
+            try:
+                val = float(t)
+                if val > 0:
+                    targets.append(val)
+            except ValueError:
+                continue
+
+        leverage_match = re.search(r'LEVERAGE\s*[Xx]?(\d+)', content)
+        leverage = int(leverage_match.group(1)) if leverage_match else 5
+
+        return {
+            'symbol': symbol,
+            'side': side,
+            'stop': stop,
+            'targets': targets[:4],
+            'leverage': leverage
+        }
+    except Exception as e:
+        print(f"[ERROR] Parse failed: {e}")
+        return None
 
 @client.event
 async def on_ready():
     print(f"[READY] Bot is online as {client.user}")
+    print("[INFO] Bot loop started")
 
 @client.event
 async def on_message(message):
-    if message.channel.id != RELAY_CHANNEL_ID or message.author.bot:
+    if message.author == client.user or message.channel.id != RELAY_CHANNEL_ID:
         return
 
-    content = message.content.strip().upper()
-    print(f"[MESSAGE] {content}")
+    print(f"[MESSAGE] {message.content.strip()}\nFrom: {message.author} | Channel: {message.channel.id}")
 
-    match = re.search(r"([A-Z]+USDT)", content)
-    if not match:
-        print("[INFO] No trading pair found.")
+    trade = parse_message(message.content)
+    if not trade:
+        print("[ERROR] Invalid trade signal format or parsing failed.")
         return
-
-    symbol_text = match.group(1)
-    base = symbol_text.replace("USDT", "")
-    try:
-        buyzone = re.search(r"BUYZONE\s*([\d.]+)\s*-\s*([\d.]+)", content).groups()
-        buy_price = (float(buyzone[0]) + float(buyzone[1])) / 2
-        stop = float(re.search(r"STOP\s*([\d.]+)", content).group(1))
-        targets = [float(t) for t in re.findall(r"TARGETS?\s+(.*?)\s+STOP", content, re.S)[0].split()]
-        leverage_match = re.search(r"LEVERAGE\s*X?(\d+)", content)
-        leverage = int(leverage_match.group(1)) if leverage_match else 5
-    except Exception as e:
-        print(f"[ERROR] Failed to parse signal: {e}")
-        return
-
-    print(f"🚀 Placing market order: BUY {base}/USDT:USDT @ {buy_price} with x{leverage}")
 
     try:
-        exchange = ccxt.mexc({
-            'apiKey': MEXC_API_KEY,
-            'secret': MEXC_SECRET_KEY,
-            'enableRateLimit': True,
-            'options': {'defaultType': 'swap'}
-        })
+        symbol = trade["symbol"]
+        side = trade["side"]
+        leverage = trade["leverage"]
+        notional = 200  # Fixed $200 per trade
 
-        markets = exchange.load_markets()
-        symbol = f"{base}/USDT:USDT"
+        await exchange.load_markets()
+        if symbol not in exchange.markets:
+            raise Exception(f"Market {symbol} not found on MEXC")
 
-        if symbol not in markets:
-            raise Exception(f"Market {symbol} not found on MEXC.")
+        market = exchange.market(symbol)
+        ticker = await exchange.fetch_ticker(symbol)
+        price = ticker.get("last")
+        if not price or price <= 0:
+            raise Exception(f"Invalid price: {price}")
 
-        market = markets[symbol]
-        price = buy_price
-        usdt_amount = 200  # Fixed notional
-        qty = usdt_amount / price
+        min_qty = market.get("limits", {}).get("amount", {}).get("min", 0.0001)
+        qty = max(notional / price, min_qty)
         qty_rounded = exchange.amount_to_precision(symbol, qty)
 
+        print(f"\U0001F680 Placing market order: {side.upper()} {qty_rounded} {symbol} @ {price} with x{leverage}")
+
         try:
-            exchange.set_leverage(leverage, symbol, {
-                'openType': 1,
-                'positionType': 1
+            await exchange.set_leverage(leverage, symbol, {
+                'openType': 1,  # Isolated
+                'positionType': 1 if side == 'buy' else 2
             })
             print(f"[INFO] Leverage set to x{leverage}")
         except Exception as e:
             print(f"[WARNING] Failed to set leverage: {e}")
 
-        order = exchange.create_market_order(
+        order = await exchange.create_market_order(
             symbol=symbol,
-            side="buy",
+            side=side,
             amount=float(qty_rounded),
             params={
                 'openType': 1,
-                'positionType': 1
+                'positionType': 1 if side == 'buy' else 2,
+                'leverage': leverage
             }
         )
 
-        print(f"[SUCCESS] Trade executed: BUY {qty_rounded} {symbol} with x{leverage} leverage")
+        print(f"[SUCCESS] Trade executed: {side.upper()} {qty_rounded} {symbol} with x{leverage} leverage")
         print(f"[ORDER INFO] Order ID: {order.get('id')}, Status: {order.get('status')}")
 
     except Exception as e:
@@ -100,6 +132,3 @@ async def on_message(message):
             await channel.send(error_message)
 
 client.run(DISCORD_BOT_TOKEN)
-
-# Version check
-print("[INFO] ccxt version:", ccxt.__version__)
