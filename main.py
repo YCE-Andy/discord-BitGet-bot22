@@ -102,4 +102,56 @@ async def on_message(message):
         # Use .get with a default for safety
         amount_precision = market.get("precision", {}).get("amount", None)
         if amount_precision is not None:
-             precision_digits = abs(int(round(math.log10(amount_precision)))) if amount_precision != 0 else 8 # Default if 0
+            # The line below caused the SyntaxError if not properly indented or within a try block
+            precision_digits = abs(int(round(math.log10(amount_precision)))) if amount_precision != 0 else 8 # Default if 0
+        else:
+            precision_digits = 8 # A reasonable default if precision is missing
+
+        min_qty = market.get("limits", {}).get("amount", {}).get("min", 0.0001)
+        qty = max(notional / price, min_qty)
+        qty_rounded = exchange.amount_to_precision(symbol, qty) # Use CCXT's precision helper
+
+        print(f"🚀 Placing market order: {side.upper()} {qty_rounded} {symbol} @ {price} with x{leverage}")
+
+        # ✅ Set leverage
+        # Note: set_leverage can sometimes return an error if leverage is already set or invalid for the market.
+        # Consider wrapping in a try-except if this becomes an issue.
+        try:
+            await exchange.set_leverage(leverage, symbol, {
+                'openType': 1,   # Isolated
+                'positionType': 1 if side == 'buy' else 2   # 1=long, 2=short
+            })
+            print(f"[INFO] Leverage set to x{leverage} for {symbol}")
+        except Exception as e:
+            print(f"[WARNING] Could not set leverage: {e}. Attempting to proceed.")
+
+
+        # ✅ Place market order
+        order = await exchange.create_market_order(
+            symbol=symbol,
+            side=side,
+            amount=float(qty_rounded), # Ensure amount is float for create_market_order
+            params={
+                'openType': 1,
+                'positionType': 1 if side == 'buy' else 2
+            }
+        )
+
+        print(f"[SUCCESS] Trade executed: {side.upper()} {qty_rounded} {symbol} with x{leverage} leverage")
+        print(f"[ORDER INFO] Order ID: {order.get('id')}, Status: {order.get('status')}")
+
+
+    except Exception as e:
+        print(f"[ERROR] Trade failed: {e}")
+        # Improve error details for CCXT exceptions
+        if isinstance(e, ccxt.NetworkError):
+            print("[DETAILS] Network error: Please check your internet connection or MEXC API status.")
+        elif isinstance(e, ccxt.ExchangeError):
+            print(f"[DETAILS] Exchange error: {e.args[0] if e.args else 'No specific message.'}")
+        elif isinstance(e, ccxt.ArgumentsRequired):
+             print(f"[DETAILS] Missing arguments for CCXT call: {e}")
+        elif hasattr(e, 'args') and isinstance(e.args[0], dict):
+            print("[DETAILS]", e.args[0])
+
+
+client.run(DISCORD_BOT_TOKEN)
