@@ -16,7 +16,7 @@ exchange = ccxt.mexc({
     'secret': os.getenv("MEXC_SECRET_KEY"),
     'enableRateLimit': True,
     'options': {
-        'defaultType': 'swap',  # Use USDT-M Futures
+        'defaultType': 'swap',
     }
 })
 
@@ -36,7 +36,7 @@ def parse_message(content):
         stop_match = re.search(r'STOP\s*([\d.]+)', content)
         stop = float(stop_match.group(1)) if stop_match else None
         targets = re.findall(r'(?:TARGETS?|^|\n)[\s:]*([\d.]+)', content)
-        targets = [float(t) for t in targets] if targets else []
+        targets = [float(t) for t in targets if t] if targets else []
 
         leverage_match = re.search(r'LEVERAGE\s*[Xx]?(\d+)', content)
         leverage = int(leverage_match.group(1)) if leverage_match else 5
@@ -49,14 +49,8 @@ def parse_message(content):
             'leverage': leverage
         }
     except Exception as e:
-        print(f"❌ Error parsing message: {e}")
+        print(f"[ERROR] Message parsing failed: {e}")
         return None
-
-def find_market_symbol(base_symbol):
-    for market_name in exchange.markets:
-        if market_name.startswith(base_symbol + "/") and ":USDT" in market_name:
-            return market_name
-    return None
 
 @client.event
 async def on_ready():
@@ -68,59 +62,67 @@ async def on_message(message):
     if message.author == client.user or message.channel.id != RELAY_CHANNEL_ID:
         return
 
-    print(f"[MESSAGE] {message.content}\n\nFrom: {message.author} | Channel: {message.channel.id}")
+    print(f"[MESSAGE] {message.content} \n\nFrom: {message.author} | Channel: {message.channel.id}")
 
     trade = parse_message(message.content)
     if not trade:
-        print("[ERROR] Invalid trade message format")
+        print("[ERROR] Message could not be parsed.")
         return
 
     try:
-        base_symbol = trade["base"]
-        symbol = find_market_symbol(base_symbol)
-        if not symbol:
-            raise Exception(f"Market {base_symbol}USDT not found on MEXC")
-
+        exchange.load_markets()
+        base = trade["base"]
         side = trade["side"]
         leverage = trade["leverage"]
         notional = 200
 
-        exchange.load_markets()
+        # ✅ Try to match symbol using actual MEXC markets
+        valid_symbol = None
+        for s in exchange.markets:
+            if s.replace("/", "").replace(":", "").upper() == f"{base}USDT":
+                valid_symbol = s
+                break
 
-        market = exchange.market(symbol)
-        price = exchange.fetch_ticker(symbol).get("last")
+        if not valid_symbol:
+            raise Exception(f"Market {base}USDT not found on MEXC")
+
+        market_info = exchange.market(valid_symbol)
+        price = exchange.fetch_ticker(valid_symbol).get("last")
         if not price or price <= 0:
-            raise Exception(f"Invalid price: {price}")
+            raise Exception(f"Invalid price for {valid_symbol}")
 
-        precision_digits = abs(int(round(math.log10(market.get("precision", {}).get("amount", 0.0001)))))
-        min_qty = market.get("limits", {}).get("amount", {}).get("min", 0.0001)
+        precision_digits = abs(int(round(math.log10(market_info.get("precision", {}).get("amount", 0.0001)))))
+        min_qty = market_info.get("limits", {}).get("amount", {}).get("min", 0.0001)
         qty = max(notional / price, min_qty)
         qty_rounded = round(qty, precision_digits)
 
-        print(f"\U0001F680 Placing market order: {side.upper()} {qty_rounded} {symbol} @ {price} with x{leverage}")
+        print(f"🚀 Placing market order: {side.upper()} {qty_rounded} {valid_symbol} @ {price} with x{leverage}")
 
-        # Set leverage
-        exchange.set_leverage(leverage, symbol, params={
-            'openType': 1,
-            'positionType': 1 if side == 'buy' else 2
-        })
-
-        # Place market order
-        order = exchange.create_market_order(
-            symbol=symbol,
-            side=side,
-            amount=qty_rounded,
+        # ✅ Set leverage
+        exchange.set_leverage(
+            leverage,
+            valid_symbol,
             params={
-                'positionSide': 'LONG' if side == 'buy' else 'SHORT',
-                'leverage': leverage
+                'openType': 1,
+                'positionType': 1 if side == 'buy' else 2
             }
         )
 
-        print(f"✅ Trade executed: {side.upper()} {qty_rounded} {symbol} with x{leverage} leverage")
+        # ✅ Create market order
+        order = exchange.create_market_order(
+            symbol=valid_symbol,
+            side=side,
+            amount=qty_rounded,
+            params={
+                'positionSide': 'LONG' if side == 'buy' else 'SHORT'
+            }
+        )
+
+        print(f"✅ Trade executed: {side.upper()} {qty_rounded} {valid_symbol} with x{leverage} leverage")
 
     except Exception as e:
         print(f"[ERROR] Trade failed: {e}")
         if hasattr(e, 'args') and isinstance(e.args[0], dict):
-            print("[MEXC Response]", e.args[0])
+            print("📦 API Response:", e.args[0])
 
 client.run(DISCORD_BOT_TOKEN)
