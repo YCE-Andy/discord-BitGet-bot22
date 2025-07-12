@@ -16,7 +16,7 @@ exchange = ccxt.mexc({
     'secret': os.getenv("MEXC_SECRET_KEY"),
     'enableRateLimit': True,
     'options': {
-        'defaultType': 'swap'  # Required for USDT-M Futures
+        'defaultType': 'swap',  # MEXC Futures
     }
 })
 
@@ -32,9 +32,9 @@ def parse_message(content):
         if not base:
             return None
 
-        symbol = f"{base}USDT"  # Correct for MEXC USDT-M Futures
-
+        symbol = f"{base}USDT"  # ✅ Correct format for MEXC
         side = 'buy' if 'BUY' in content else 'sell'
+
         stop_match = re.search(r'STOP\s*([\d.]+)', content)
         stop = float(stop_match.group(1)) if stop_match else None
 
@@ -83,7 +83,7 @@ async def on_message(message):
         symbol = trade["symbol"]
         side = trade["side"]
         leverage = trade["leverage"]
-        notional = 200
+        notional = 200  # USDT value per trade
 
         await exchange.load_markets()
         if symbol not in exchange.markets:
@@ -96,7 +96,10 @@ async def on_message(message):
             raise Exception(f"Invalid price: {price}")
 
         amount_precision = market.get("precision", {}).get("amount", None)
-        precision_digits = abs(int(round(math.log10(amount_precision)))) if amount_precision else 4
+        if amount_precision is not None and amount_precision > 0:
+            precision_digits = abs(int(round(math.log10(amount_precision))))
+        else:
+            precision_digits = 4
 
         min_qty = market.get("limits", {}).get("amount", {}).get("min", 0.0001)
         qty = max(notional / price, min_qty)
@@ -109,9 +112,9 @@ async def on_message(message):
                 'openType': 1,
                 'positionType': 1 if side == 'buy' else 2
             })
-            print(f"[INFO] Leverage set to x{leverage} for {symbol}")
+            print(f"[INFO] Leverage set to x{leverage}")
         except Exception as e:
-            print(f"[WARNING] Could not set leverage: {e}")
+            print(f"[WARNING] Failed to set leverage: {e}")
 
         order = await exchange.create_market_order(
             symbol=symbol,
@@ -123,20 +126,14 @@ async def on_message(message):
             }
         )
 
-        print(f"[SUCCESS] Trade executed: {side.upper()} {qty_rounded} {symbol} with x{leverage}")
-        print(f"[ORDER ID] {order.get('id')} | Status: {order.get('status')}")
+        print(f"[SUCCESS] Trade executed: {side.upper()} {qty_rounded} {symbol} with x{leverage} leverage")
+        print(f"[ORDER INFO] Order ID: {order.get('id')}, Status: {order.get('status')}")
 
     except Exception as e:
-    error_message = str(e)
-    print(f"[ERROR] Trade failed: {error_message}")
-
-    # 🚨 Alert if contract is missing
-    if "合约不存在" in error_message or "Market" in error_message and "not found" in error_message:
-        alert_channel_id = int(os.getenv("ALERT_CHANNEL_ID"))  # You can set this to your Discord alert channel
-        alert_channel = client.get_channel(alert_channel_id)
-        if alert_channel:
-            await alert_channel.send(f"🚨 **ALERT**: Trade failed due to missing contract!\nError: `{error_message}`")
-        else:
-            print("[WARNING] Could not find alert channel to send alert message.")
+        error_message = f"[ERROR] Trade failed: {str(e)}"
+        print(error_message)
+        channel = client.get_channel(RELAY_CHANNEL_ID)
+        if channel:
+            await channel.send(error_message)
 
 client.run(DISCORD_BOT_TOKEN)
