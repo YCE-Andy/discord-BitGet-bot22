@@ -32,7 +32,7 @@ def parse_message(content):
         if not base:
             return None
 
-        symbol = f"{base}USDT"  # ✅ Correct format for MEXC
+        symbol = f"{base}/USDT:USDT"  # ✅ Correct format for MEXC
         side = 'buy' if 'BUY' in content else 'sell'
 
         stop_match = re.search(r'STOP\s*([\d.]+)', content)
