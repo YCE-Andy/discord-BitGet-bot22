@@ -1,6 +1,7 @@
 import os
 import discord
-import ccxt
+import ccxt.async_support as ccxt  # async version of ccxt
+import asyncio
 import re
 import math
 from dotenv import load_dotenv
@@ -15,7 +16,7 @@ exchange = ccxt.mexc({
     'secret': os.getenv("MEXC_SECRET_KEY"),
     'enableRateLimit': True,
     'options': {
-        'defaultType': 'swap',  # USDT-M Futures
+        'defaultType': 'swap'  # USDT-M Futures
     }
 })
 
@@ -31,12 +32,21 @@ def parse_message(content):
         if not base:
             return None
 
-        symbol = f"{base}/USDT"
+        symbol = f"{base}USDT"  # ✅ Correct format for MEXC futures via CCXT
+
         side = 'buy' if 'BUY' in content else 'sell'
         stop_match = re.search(r'STOP\s*([\d.]+)', content)
         stop = float(stop_match.group(1)) if stop_match else None
-        targets = re.findall(r'(?:TARGETS?|^|\n)[\s:]*([\d.]+)', content)
-        targets = [float(t) for t in targets if float(t) > 0]
+
+        targets_raw = re.findall(r'(?:TARGETS?|^|\n)[\s:]*([\d.]+)', content)
+        targets = []
+        for t in targets_raw:
+            try:
+                val = float(t)
+                if val > 0:
+                    targets.append(val)
+            except ValueError:
+                continue
 
         leverage_match = re.search(r'LEVERAGE\s*[Xx]?(\d+)', content)
         leverage = int(leverage_match.group(1)) if leverage_match else 5
@@ -56,6 +66,10 @@ def parse_message(content):
 async def on_ready():
     print(f"[READY] Bot is online as {client.user}")
     print("[INFO] Bot loop started")
+    # ✅ Bonus: Print available MEXC Futures trading pairs
+    markets = await exchange.load_markets()
+    swap_symbols = [s for s, m in markets.items() if m['type'] == 'swap']
+    print(f"[INFO] Available MEXC Futures Symbols: {swap_symbols[:20]} ... (+{len(swap_symbols) - 20} more)" if len(swap_symbols) > 20 else swap_symbols)
 
 @client.event
 async def on_message(message):
@@ -75,46 +89,60 @@ async def on_message(message):
         leverage = trade["leverage"]
         notional = 200
 
-        exchange.load_markets()
-        if symbol not in exchange.markets:
-            raise Exception(f"Market {symbol} not found on MEXC")
+        await exchange.load_markets()
+        if symbol not in exchange.markets or exchange.market(symbol)['type'] != 'swap':
+            print(f"[SKIP] {symbol} is not available on MEXC futures (swap market)")
+            return
 
         market = exchange.market(symbol)
-        ticker = exchange.fetch_ticker(symbol)
+        ticker = await exchange.fetch_ticker(symbol)
         price = ticker.get("last")
         if not price or price <= 0:
             raise Exception(f"Invalid price: {price}")
 
-        amount_precision = market.get("precision", {}).get("amount", 0.0001)
+        amount_precision = market.get("precision", {}).get("amount", None)
+        if amount_precision is not None and amount_precision != 0:
+            precision_digits = abs(int(round(math.log10(amount_precision))))
+        else:
+            precision_digits = 4  # fallback
+
         min_qty = market.get("limits", {}).get("amount", {}).get("min", 0.0001)
         qty = max(notional / price, min_qty)
-        qty_rounded = float(exchange.amount_to_precision(symbol, qty))
+        qty_rounded = exchange.amount_to_precision(symbol, qty)
 
         print(f"🚀 Placing market order: {side.upper()} {qty_rounded} {symbol} @ {price} with x{leverage}")
 
-        # Set leverage
-        exchange.set_leverage(leverage, symbol, {
-            'openType': 1,  # Isolated
-            'positionType': 1 if side == 'buy' else 2
-        })
+        try:
+            await exchange.set_leverage(leverage, symbol, {
+                'openType': 1,
+                'positionType': 1 if side == 'buy' else 2
+            })
+            print(f"[INFO] Leverage set to x{leverage} for {symbol}")
+        except Exception as e:
+            print(f"[WARNING] Could not set leverage: {e}. Attempting to continue.")
 
-        # Place market order
-        order = exchange.create_market_order(
+        order = await exchange.create_market_order(
             symbol=symbol,
             side=side,
-            amount=qty_rounded,
+            amount=float(qty_rounded),
             params={
                 'openType': 1,
                 'positionType': 1 if side == 'buy' else 2
             }
         )
 
-        print(f"[SUCCESS] Trade executed: {side.upper()} {qty_rounded} {symbol} with x{leverage} leverage")
-        print(f"[ORDER] ID: {order.get('id')} | Status: {order.get('status')}")
+        print(f"[SUCCESS] Trade executed: {side.upper()} {qty_rounded} {symbol} with x{leverage}")
+        print(f"[ORDER INFO] Order ID: {order.get('id')}, Status: {order.get('status')}")
 
     except Exception as e:
         print(f"[ERROR] Trade failed: {e}")
-        if hasattr(e, 'args') and isinstance(e.args[0], dict):
+        if isinstance(e, ccxt.NetworkError):
+            print("[DETAILS] Network error")
+        elif isinstance(e, ccxt.ExchangeError):
+            print(f"[DETAILS] Exchange error: {e}")
+        elif isinstance(e, ccxt.ArgumentsRequired):
+            print(f"[DETAILS] Missing arguments: {e}")
+        elif hasattr(e, 'args') and isinstance(e.args[0], dict):
             print("[DETAILS]", e.args[0])
 
 client.run(DISCORD_BOT_TOKEN)
