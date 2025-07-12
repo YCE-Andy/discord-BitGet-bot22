@@ -1,9 +1,8 @@
 import os
 import discord
-import ccxt.async_support as ccxt
+import ccxt.async_support as ccxt  # Use async version
 import asyncio
 import re
-import math
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -16,7 +15,7 @@ exchange = ccxt.mexc({
     'secret': os.getenv("MEXC_SECRET_KEY"),
     'enableRateLimit': True,
     'options': {
-        'defaultType': 'swap'  # USDT-M futures
+        'defaultType': 'swap'  # USDT-M Futures
     }
 })
 
@@ -32,21 +31,14 @@ def parse_message(content):
         if not base:
             return None
 
-        symbol = f"{base}/USDT:USDT"
+        symbol = f"{base}_USDT"  # Correct format for MEXC USDT-M futures
         side = 'buy' if 'BUY' in content else 'sell'
 
         stop_match = re.search(r'STOP\s*([\d.]+)', content)
         stop = float(stop_match.group(1)) if stop_match else None
 
-        targets_raw = re.findall(r'(?:TARGETS?|^|\n)[\s:]*([\d.]+)', content)
-        targets = []
-        for t in targets_raw:
-            try:
-                val = float(t)
-                if val > 0:
-                    targets.append(val)
-            except ValueError:
-                continue
+        targets = re.findall(r'(?:TARGETS?|^|\n)[\s:]*([\d.]+)', content)
+        targets = [float(t) for t in targets if float(t) > 0][:4]
 
         leverage_match = re.search(r'LEVERAGE\s*[Xx]?(\d+)', content)
         leverage = int(leverage_match.group(1)) if leverage_match else 5
@@ -55,7 +47,7 @@ def parse_message(content):
             'symbol': symbol,
             'side': side,
             'stop': stop,
-            'targets': targets[:4],
+            'targets': targets,
             'leverage': leverage
         }
     except Exception as e:
@@ -72,7 +64,7 @@ async def on_message(message):
     if message.author == client.user or message.channel.id != RELAY_CHANNEL_ID:
         return
 
-    print(f"[MESSAGE] {message.content.strip()}\nFrom: {message.author} | Channel: {message.channel.id}")
+    print(f"[MESSAGE] {message.content.strip()} \nFrom: {message.author} | Channel: {message.channel.id}")
 
     trade = parse_message(message.content)
     if not trade:
@@ -83,7 +75,7 @@ async def on_message(message):
         symbol = trade["symbol"]
         side = trade["side"]
         leverage = trade["leverage"]
-        notional = 200  # Fixed $200 per trade
+        notional = 20  # Keep this small for test
 
         await exchange.load_markets()
         if symbol not in exchange.markets:
@@ -95,23 +87,20 @@ async def on_message(message):
         if not price or price <= 0:
             raise Exception(f"Invalid price: {price}")
 
-        min_qty = market.get("limits", {}).get("amount", {}).get("min", 0.0001)
-        qty = max(notional / price, min_qty)
+        qty = notional / price
+        qty = max(qty, market['limits']['amount']['min'])
         qty_rounded = exchange.amount_to_precision(symbol, qty)
 
-        print(f"\U0001F680 Placing market order: {side.upper()} {qty_rounded} {symbol} @ {price} with x{leverage}")
+        print(f"🚀 Placing market order: {side.upper()} {qty_rounded} {symbol} @ {price} with x{leverage}")
 
-        try:
-            await exchange.set_leverage(leverage, symbol, {
-                'openType': 1,  # Isolated
-                'positionType': 1 if side == 'buy' else 2
-            })
-            print(f"[INFO] Leverage set to x{leverage}")
-        except Exception as e:
-            print(f"[WARNING] Failed to set leverage: {e}")
+        await exchange.set_leverage(leverage, symbol, {
+            'openType': 1,  # Isolated
+            'positionType': 1 if side == 'buy' else 2
+        })
 
-        order = await exchange.create_market_order(
+        order = await exchange.create_order(
             symbol=symbol,
+            type='market',
             side=side,
             amount=float(qty_rounded),
             params={
@@ -121,8 +110,8 @@ async def on_message(message):
             }
         )
 
-        print(f"[SUCCESS] Trade executed: {side.upper()} {qty_rounded} {symbol} with x{leverage} leverage")
-        print(f"[ORDER INFO] Order ID: {order.get('id')}, Status: {order.get('status')}")
+        print(f"[SUCCESS] Trade executed: {side.upper()} {qty_rounded} {symbol}")
+        print(f"[ORDER ID] {order.get('id')} | Status: {order.get('status')}")
 
     except Exception as e:
         error_message = f"[ERROR] Trade failed: {str(e)}"
