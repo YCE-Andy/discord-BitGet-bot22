@@ -8,14 +8,20 @@ import discord
 import asyncio
 
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-SOURCE_CHANNEL_ID = int(os.getenv("SOURCE_CHANNEL_ID"))
-TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", 200))
+SOURCE_CHANNEL_ID = int(os.getenv("DISCORD_SOURCE_CHANNEL_ID"))
+RELAY_CHANNEL_ID = int(os.getenv("DISCORD_RELAY_CHANNEL_ID"))
+ALERT_CHANNEL_ID = int(os.getenv("ALERT_CHANNEL_ID"))
+
 MEXC_API_KEY = os.getenv("MEXC_API_KEY")
 MEXC_SECRET_KEY = os.getenv("MEXC_SECRET_KEY")
 DEFAULT_LEVERAGE = int(os.getenv("LEVERAGE", 5))
+TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", 200))
 
 API_BASE = "https://contract.mexc.com"
-client = discord.Client(intents=discord.Intents.all())
+
+intents = discord.Intents.default()
+intents.message_content = True
+client = discord.Client(intents=intents)
 
 def sign_request(params, secret):
     sorted_params = sorted(params.items())
@@ -24,18 +30,14 @@ def sign_request(params, secret):
     return signature
 
 def get_symbol_precision(symbol):
-    url = f"{API_BASE}/api/v1/contract/detail"
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(f"{API_BASE}/api/v1/contract/detail", timeout=10)
         data = response.json()
-        print(f"🔍 Raw /contract/detail response:\n{json.dumps(data, indent=2)}")
         for item in data["data"]:
             if item["symbol"] == symbol:
-                print(f"✅ Found symbol: {symbol}")
                 return item["priceScale"], item["volScale"]
-        print(f"❌ Symbol {symbol} not found in MEXC contract list")
     except Exception as e:
-        print(f"❌ Error fetching symbol precision: {e}")
+        print("⚠️ Error fetching symbol precision:", e)
     return None, None
 
 def place_futures_order(symbol, side, quantity, leverage):
@@ -44,7 +46,7 @@ def place_futures_order(symbol, side, quantity, leverage):
     timestamp = int(time.time() * 1000)
 
     order_type = 1  # market
-    open_type = 1   # cross
+    open_type = 1   # cross margin
 
     params = {
         "api_key": MEXC_API_KEY,
@@ -64,8 +66,7 @@ def place_futures_order(symbol, side, quantity, leverage):
     headers = {'Content-Type': 'application/json'}
 
     try:
-        print(f"🛠 Sending order: {params}")
-        response = requests.post(url, headers=headers, json=params, timeout=10)
+        response = requests.post(url, headers=headers, json=params, timeout=30)
         return response.json()
     except Exception as e:
         return {"error": f"MEXC request error: {str(e)}"}
@@ -78,19 +79,20 @@ async def on_ready():
 async def on_message(message):
     if message.author.bot:
         return
+
     if message.channel.id != SOURCE_CHANNEL_ID:
         print(f"🟨 Message received but ignored: Wrong channel ({message.channel.id})")
         return
 
     content = message.content.upper()
+
     if "BUYZONE" in content and "TARGETS" in content and "STOP" in content:
         try:
             parts = content.split()
-            base_symbol = parts[0].replace("PERP", "").replace("USDT", "")
-            symbol = f"{base_symbol}_USDT"
-            side = "buy"
-            leverage = DEFAULT_LEVERAGE
+            symbol_raw = parts[0].replace("PERP", "").replace("USDT", "")
+            symbol = f"{symbol_raw}_USDT"
 
+            leverage = DEFAULT_LEVERAGE
             if "LEVERAGE" in content:
                 lev_index = parts.index("LEVERAGE")
                 leverage = int(parts[lev_index + 1].replace("X", ""))
@@ -101,27 +103,27 @@ async def on_message(message):
             entry_price = (entry_low + entry_high) / 2
 
             price_precision, vol_precision = get_symbol_precision(symbol)
-            if price_precision is None:
+            if price_precision is None or vol_precision is None:
                 await message.channel.send(f"❌ Unknown symbol or failed to fetch precision: {symbol}")
                 return
 
             qty = round(TRADE_AMOUNT / entry_price, vol_precision)
-            await message.channel.send(
-                f"🔎 Parsed symbol: {symbol}\n"
-                f"⚙️ Leverage detected: x{leverage}\n"
-                f"💰 Entry price: {entry_price}\n"
-                f"📐 Precision: price={price_precision}, vol={vol_precision}\n"
-                f"📦 Quantity: {qty}"
-            )
 
-            await asyncio.sleep(1)  # Let Discord send message before placing order
+            await message.channel.send(f"🔎 Parsed symbol: {symbol}")
+            await message.channel.send(f"⚙️ Leverage detected: x{leverage}")
+            await message.channel.send(f"💰 Entry price: {entry_price}")
+            await message.channel.send(f"📐 Precision: price={price_precision}, vol={vol_precision}")
+            await message.channel.send(f"📦 Quantity: {qty}")
 
-            result = place_futures_order(symbol, side, qty, leverage)
+            result = place_futures_order(symbol, "buy", qty, leverage)
 
-            if result.get("success") or result.get("code") == 0:
+            await asyncio.sleep(2)  # Let Discord queue breathe
+
+            if result.get("success"):
                 await message.channel.send(f"✅ Trade Executed: {symbol} x{leverage}")
             else:
                 await message.channel.send(f"❌ Trade Failed: {result}")
+
         except Exception as e:
             await message.channel.send(f"⚠️ Error: {str(e)}")
 
