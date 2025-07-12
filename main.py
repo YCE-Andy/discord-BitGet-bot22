@@ -16,7 +16,7 @@ exchange = ccxt.mexc({
     'secret': os.getenv("MEXC_SECRET_KEY"),
     'enableRateLimit': True,
     'options': {
-        'defaultType': 'swap',  # USDT-M futures
+        'defaultType': 'swap',  # ✅ MEXC Futures (USDT-M)
     }
 })
 
@@ -32,7 +32,7 @@ def parse_message(content):
         if not base:
             return None
 
-        symbol = f"{base}_USDT"  # ✅ Final working symbol format
+        symbol = f"{base}_USDT"  # ✅ Final correct format for MEXC futures
         side = 'buy' if 'BUY' in content else 'sell'
         stop_match = re.search(r'STOP\s*([\d.]+)', content)
         stop = float(stop_match.group(1)) if stop_match else None
@@ -62,7 +62,7 @@ async def on_message(message):
     if message.author == client.user or message.channel.id != RELAY_CHANNEL_ID:
         return
 
-    print(f"[MESSAGE] {message.content}\n\nFrom: {message.author} | Channel: {message.channel.id}")
+    print(f"[MESSAGE] {message.content.strip()} \nFrom: {message.author} | Channel: {message.channel.id}")
 
     trade = parse_message(message.content)
     if not trade:
@@ -73,7 +73,7 @@ async def on_message(message):
         symbol = trade["symbol"]
         side = trade["side"]
         leverage = trade["leverage"]
-        notional = 200  # USDT
+        notional = 200  # USDT fixed value
 
         exchange.load_markets()
         if symbol not in exchange.markets:
@@ -91,13 +91,13 @@ async def on_message(message):
 
         print(f"🚀 Placing market order: {side.upper()} {qty_rounded} {symbol} @ {price} with x{leverage}")
 
-        # ✅ Set leverage for the futures symbol
+        # ✅ Set leverage
         exchange.set_leverage(leverage, symbol, {
             'openType': 1,  # Isolated
-            'positionType': 1 if side == 'buy' else 2
+            'positionType': 1 if side == 'buy' else 2  # 1=long, 2=short
         })
 
-        # ✅ Place the market order
+        # ✅ Place market order
         order = exchange.create_market_order(
             symbol=symbol,
             side=side,
