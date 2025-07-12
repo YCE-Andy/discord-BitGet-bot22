@@ -1,110 +1,119 @@
-# ✅ MEXC Futures Auto-Trader Bot with Discord Alerts (No ccxt, Direct API)
-
 import discord
-import asyncio
-import aiohttp
+import re
+import time
 import hmac
 import hashlib
-import time
+import requests
+import json
 import os
+from discord.ext import commands
 
-# 🔐 Load from environment vars (Railway recommended)
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-DISCORD_CHANNEL_ID = int(os.getenv("RELAY_CHANNEL_ID"))  # Must be int
+RELAY_CHANNEL_ID = int(os.getenv("RELAY_CHANNEL_ID"))
 MEXC_API_KEY = os.getenv("MEXC_API_KEY")
 MEXC_SECRET_KEY = os.getenv("MEXC_SECRET_KEY")
-API_BASE = "https://contract.mexc.com"
 
-# ⚙️ Configure trade amount
-USDT_PER_TRADE = 20  # Small amount for test/live safety
+API_BASE = "https://contract.mexc.com"
 
 intents = discord.Intents.default()
 intents.messages = True
-client = discord.Client(intents=intents)
+intents.message_content = True
+client = commands.Bot(command_prefix="!", intents=intents)
 
-# 🔐 MEXC Signature Generator
+TRADE_SIGNAL_REGEX = re.compile(
+    r"(?P<symbol>[A-Z]+USDT)\s+"
+    r"BUYZONE\s+(?P<buyzone_low>[\d.]+)\s*-\s*(?P<buyzone_high>[\d.]+)\s+"
+    r"TARGETS\s+(?P<targets>(?:[\d.]+\s*){1,5})\s+"
+    r"STOP\s+(?P<stop>[\d.]+)\s+"
+    r"LEVERAGE\s*[xX]?(?P<leverage>\d+)"
+)
+
+HEADERS = {
+    "Content-Type": "application/json",
+    "ApiKey": MEXC_API_KEY
+}
+
+
 def sign(params):
-    sorted_params = sorted(params.items())
-    query_string = "&".join(f"{k}={v}" for k, v in sorted_params)
-    signature = hmac.new(MEXC_SECRET_KEY.encode(), query_string.encode(), hashlib.sha256).hexdigest()
-    return signature
+    query_string = "&".join([f"{key}={params[key]}" for key in sorted(params)])
+    return hmac.new(MEXC_SECRET_KEY.encode("utf-8"), query_string.encode("utf-8"), hashlib.sha256).hexdigest()
 
-# 🛒 Place Futures Order
-def build_order(symbol, price, vol, leverage, side):
-    return {
+
+def get_symbol_info():
+    url = f"{API_BASE}/api/v1/contract/init"  # This returns futures symbols
+    response = requests.get(url)
+    return response.json()
+
+
+def place_order(symbol, price, vol, leverage, side):
+    path = "/api/v1/private/order/submit"
+    url = API_BASE + path
+
+    order_type = 1  # Market order
+    open_type = 1   # Isolated
+    position_id = 0
+    external_oid = str(int(time.time() * 1000))
+
+    params = {
         "symbol": symbol,
-        "price": price,
+        "price": 0,
         "vol": vol,
         "leverage": leverage,
         "side": 1 if side == "buy" else 2,
-        "type": 1,  # Market order
-        "open_type": 1,
-        "position_id": 0,
-        "external_oid": str(int(time.time() * 1000)),
-        "stop_loss_price": 0,
-        "take_profit_price": 0,
-        "position_mode": 1,
-        "reduce_only": False
+        "type": order_type,
+        "open_type": open_type,
+        "position_id": position_id,
+        "external_oid": external_oid,
+        "timestamp": int(time.time() * 1000),
     }
+    params["sign"] = sign(params)
+    response = requests.post(url, headers=HEADERS, data=json.dumps(params))
+    return response.json()
 
-async def place_futures_order(symbol, price, usdt_amount, leverage, side):
-    timestamp = int(time.time() * 1000)
-    qty = round(usdt_amount / price, 3)  # ⚠️ Ensure correct precision manually
-    order = build_order(symbol, price, qty, leverage, side)
-    order["api_key"] = MEXC_API_KEY
-    order["req_time"] = timestamp
-    order["sign"] = sign(order)
-
-    async with aiohttp.ClientSession() as session:
-        async with session.post(f"{API_BASE}/api/v1/private/order/submit", data=order) as resp:
-            return await resp.json()
-
-# 🔍 Parse Signal Message
-def parse_signal(content):
-    lines = content.strip().split("\n")
-    signal = {}
-    for line in lines:
-        l = line.strip().upper()
-        if l.startswith("BUYZONE"):
-            prices = [float(x.strip()) for x in l.replace("BUYZONE", "").split("-")]
-            signal["buyzone"] = sum(prices) / len(prices)
-        elif l.startswith("STOP"):
-            signal["stop"] = float(l.replace("STOP", "").strip())
-        elif l.startswith("LEVERAGE"):
-            signal["leverage"] = int(l.replace("LEVERAGE", "").replace("X", "").strip())
-        elif l.endswith("USDT"):
-            symbol = l.replace("USDT", "_USDT")
-            signal["symbol"] = symbol
-    return signal if "symbol" in signal and "buyzone" in signal else None
 
 @client.event
 async def on_ready():
     print(f"[READY] Logged in as {client.user}")
 
+
 @client.event
 async def on_message(message):
-    if message.channel.id != DISCORD_CHANNEL_ID or message.author == client.user:
+    if message.channel.id != RELAY_CHANNEL_ID or message.author == client.user:
         return
 
-    signal = parse_signal(message.content)
-    if not signal:
+    content = message.content.strip()
+    match = TRADE_SIGNAL_REGEX.search(content)
+    if not match:
         return
 
     try:
-        response = await place_futures_order(
-            symbol=signal["symbol"],
-            price=signal["buyzone"],
-            usdt_amount=USDT_PER_TRADE,
-            leverage=signal.get("leverage", 5),
-            side="buy"
-        )
+        data = match.groupdict()
+        symbol_raw = data['symbol'].upper()
+        base_symbol = symbol_raw.replace("USDT", "")
+
+        # Fetch available symbols
+        all_symbols = get_symbol_info()
+        contracts = all_symbols.get("data", {}).get("symbol", [])
+
+        matched_contract = next((c for c in contracts if c["symbol"] == base_symbol + "_USDT"), None)
+        if not matched_contract:
+            await message.channel.send(f"[ERROR] Market {symbol_raw} not found on MEXC.")
+            return
+
+        mexc_symbol = matched_contract["symbol"]
+        entry_price = float(data['buyzone_low'])
+        leverage = int(data['leverage'])
+        qty = round(20 / entry_price, 2)  # Fixed $20 notional size
+
+        response = place_order(mexc_symbol, entry_price, qty, leverage, "buy")
 
         if response.get("success"):
-            await message.channel.send(f"✅ Trade executed: {signal['symbol']} @ {signal['buyzone']} x{signal['leverage']}")
+            await message.channel.send(f"✅ Trade executed: {symbol_raw} BUY {qty} @ {entry_price} x{leverage}")
         else:
-            await message.channel.send(f"❌ Trade failed: {response.get('message', 'Unknown error')}")
+            await message.channel.send(f"❌ Trade failed: {response.get('message') or response}")
 
     except Exception as e:
-        await message.channel.send(f"⚠️ Error placing trade: {str(e)}")
+        await message.channel.send(f"❌ Trade error: {str(e)}")
+
 
 client.run(DISCORD_BOT_TOKEN)
