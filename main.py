@@ -127,6 +127,16 @@ async def on_message(message):
         print(f"[ORDER ID] {order.get('id')} | Status: {order.get('status')}")
 
     except Exception as e:
-        print(f"[ERROR] Trade failed: {e}")
+    error_message = str(e)
+    print(f"[ERROR] Trade failed: {error_message}")
+
+    # 🚨 Alert if contract is missing
+    if "合约不存在" in error_message or "Market" in error_message and "not found" in error_message:
+        alert_channel_id = int(os.getenv("ALERT_CHANNEL_ID"))  # You can set this to your Discord alert channel
+        alert_channel = client.get_channel(alert_channel_id)
+        if alert_channel:
+            await alert_channel.send(f"🚨 **ALERT**: Trade failed due to missing contract!\nError: `{error_message}`")
+        else:
+            print("[WARNING] Could not find alert channel to send alert message.")
 
 client.run(DISCORD_BOT_TOKEN)
