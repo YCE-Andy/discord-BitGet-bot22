@@ -1,6 +1,6 @@
 import os
 import discord
-import ccxt.async_support as ccxt  # async version of ccxt
+import ccxt.async_support as ccxt
 import asyncio
 import re
 import math
@@ -16,7 +16,7 @@ exchange = ccxt.mexc({
     'secret': os.getenv("MEXC_SECRET_KEY"),
     'enableRateLimit': True,
     'options': {
-        'defaultType': 'swap'  # USDT-M Futures
+        'defaultType': 'swap'  # Required for USDT-M Futures
     }
 })
 
@@ -32,7 +32,7 @@ def parse_message(content):
         if not base:
             return None
 
-        symbol = f"{base}USDT"  # ✅ Correct format for MEXC futures via CCXT
+        symbol = f"{base}USDT"  # Correct for MEXC USDT-M Futures
 
         side = 'buy' if 'BUY' in content else 'sell'
         stop_match = re.search(r'STOP\s*([\d.]+)', content)
@@ -66,10 +66,6 @@ def parse_message(content):
 async def on_ready():
     print(f"[READY] Bot is online as {client.user}")
     print("[INFO] Bot loop started")
-    # ✅ Bonus: Print available MEXC Futures trading pairs
-    markets = await exchange.load_markets()
-    swap_symbols = [s for s, m in markets.items() if m['type'] == 'swap']
-    print(f"[INFO] Available MEXC Futures Symbols: {swap_symbols[:20]} ... (+{len(swap_symbols) - 20} more)" if len(swap_symbols) > 20 else swap_symbols)
 
 @client.event
 async def on_message(message):
@@ -90,9 +86,8 @@ async def on_message(message):
         notional = 200
 
         await exchange.load_markets()
-        if symbol not in exchange.markets or exchange.market(symbol)['type'] != 'swap':
-            print(f"[SKIP] {symbol} is not available on MEXC futures (swap market)")
-            return
+        if symbol not in exchange.markets:
+            raise Exception(f"Market {symbol} not found on MEXC.")
 
         market = exchange.market(symbol)
         ticker = await exchange.fetch_ticker(symbol)
@@ -101,10 +96,7 @@ async def on_message(message):
             raise Exception(f"Invalid price: {price}")
 
         amount_precision = market.get("precision", {}).get("amount", None)
-        if amount_precision is not None and amount_precision != 0:
-            precision_digits = abs(int(round(math.log10(amount_precision))))
-        else:
-            precision_digits = 4  # fallback
+        precision_digits = abs(int(round(math.log10(amount_precision)))) if amount_precision else 4
 
         min_qty = market.get("limits", {}).get("amount", {}).get("min", 0.0001)
         qty = max(notional / price, min_qty)
@@ -119,7 +111,7 @@ async def on_message(message):
             })
             print(f"[INFO] Leverage set to x{leverage} for {symbol}")
         except Exception as e:
-            print(f"[WARNING] Could not set leverage: {e}. Attempting to continue.")
+            print(f"[WARNING] Could not set leverage: {e}")
 
         order = await exchange.create_market_order(
             symbol=symbol,
@@ -132,17 +124,9 @@ async def on_message(message):
         )
 
         print(f"[SUCCESS] Trade executed: {side.upper()} {qty_rounded} {symbol} with x{leverage}")
-        print(f"[ORDER INFO] Order ID: {order.get('id')}, Status: {order.get('status')}")
+        print(f"[ORDER ID] {order.get('id')} | Status: {order.get('status')}")
 
     except Exception as e:
         print(f"[ERROR] Trade failed: {e}")
-        if isinstance(e, ccxt.NetworkError):
-            print("[DETAILS] Network error")
-        elif isinstance(e, ccxt.ExchangeError):
-            print(f"[DETAILS] Exchange error: {e}")
-        elif isinstance(e, ccxt.ArgumentsRequired):
-            print(f"[DETAILS] Missing arguments: {e}")
-        elif hasattr(e, 'args') and isinstance(e.args[0], dict):
-            print("[DETAILS]", e.args[0])
 
 client.run(DISCORD_BOT_TOKEN)
