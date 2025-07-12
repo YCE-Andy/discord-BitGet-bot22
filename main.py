@@ -4,6 +4,7 @@ import ccxt.async_support as ccxt
 import asyncio
 import re
 import math
+import ccxt  # ✅ Add this with the other imports
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -137,3 +138,6 @@ async def on_message(message):
             await channel.send(error_message)
 
 client.run(DISCORD_BOT_TOKEN)
+
+import ccxt
+print("[INFO] ccxt version:", ccxt.__version__)
