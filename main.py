@@ -8,9 +8,8 @@ import discord
 import asyncio
 from dotenv import load_dotenv
 
-# Load environment variables
+# ---- LOAD ENV ----
 load_dotenv()
-
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 ALERT_CHANNEL_ID = int(os.getenv("ALERT_CHANNEL_ID"))
 
@@ -20,35 +19,53 @@ BITGET_PASSPHRASE = os.getenv("BITGET_PASSPHRASE", "")
 TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", "200"))
 DEFAULT_LEVERAGE = int(os.getenv("LEVERAGE", "5"))
 
+# ---- DISCORD CLIENT SETUP ----
 intents = discord.Intents.default()
 intents.messages = True
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-# ---- SIGNING ----
+# ---- BITGET SIGNATURE ----
 def sign_bitget_request(secret, timestamp, method, path, body=''):
-    """Generate Bitget signature."""
     pre_hash = f"{timestamp}{method.upper()}{path}{body}"
-    signature = hmac.new(secret.encode(), pre_hash.encode(), hashlib.sha256).hexdigest()
-    return signature
+    return hmac.new(secret.encode(), pre_hash.encode(), hashlib.sha256).hexdigest()
 
-# ---- ORDER PLACEMENT ----
+# ---- BITGET AUTH TEST ----
+def test_bitget_auth():
+    url = "https://api.bitget.com/api/v2/mix/account/accounts?productType=umcbl"
+    timestamp = str(int(time.time() * 1000))
+    path = "/api/v2/mix/account/accounts"
+    query = "?productType=umcbl"
+    signature = sign_bitget_request(BITGET_SECRET_KEY, timestamp, "GET", path + query)
+
+    headers = {
+        "ACCESS-KEY": BITGET_API_KEY,
+        "ACCESS-SIGN": signature,
+        "ACCESS-TIMESTAMP": timestamp,
+        "ACCESS-PASSPHRASE": BITGET_PASSPHRASE
+    }
+
+    try:
+        print("📡 Running Bitget API Key Test...")
+        response = requests.get(url, headers=headers)
+        print("📥 Bitget Auth Test Response:")
+        print(response.text)
+    except Exception as e:
+        print(f"❌ Bitget Auth Test Error: {e}")
+
+# ---- PLACE BITGET ORDER ----
 def place_futures_order(symbol, side, quantity, leverage):
-    """Place a futures market order on Bitget."""
     base_url = "https://api.bitget.com"
     path = "/api/v2/mix/order/place-order"
     url = base_url + path
     timestamp = str(int(time.time() * 1000))
 
-    side = side.lower()  # 'buy' or 'sell'
-    order_type = "market"  # We use market orders
-
     body = {
         "symbol": symbol,
         "marginCoin": "USDT",
         "size": str(quantity),
-        "side": side,
-        "orderType": order_type,
+        "side": side.lower(),
+        "orderType": "market",
         "force": "gtc",
         "leverage": str(leverage)
     }
@@ -73,7 +90,7 @@ def place_futures_order(symbol, side, quantity, leverage):
         print(f"⚠️ Bitget request error: {e}")
         return {"error": str(e)}
 
-# ---- DISCORD BOT EVENTS ----
+# ---- DISCORD EVENTS ----
 @client.event
 async def on_ready():
     print(f"✅ Logged in as {client.user}")
@@ -93,7 +110,7 @@ async def on_message(message):
         try:
             parts = content.split()
             raw_symbol = parts[0].replace("PERP", "").replace("USDT", "")
-            symbol = raw_symbol + "USDT_UMCBL"  # Bitget USDT-margined perpetual format
+            symbol = raw_symbol + "USDT_UMCBL"
             side = "buy"
             leverage = DEFAULT_LEVERAGE
 
@@ -131,5 +148,8 @@ async def on_message(message):
         except Exception as e:
             await message.channel.send(f"⚠️ Error: {str(e)}")
 
-# Run the bot
+# ---- TEMP TEST AUTH RUN ----
+test_bitget_auth()
+
+# ---- START DISCORD BOT ----
 client.run(DISCORD_BOT_TOKEN)
