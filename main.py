@@ -8,15 +8,15 @@ import discord
 import asyncio
 from dotenv import load_dotenv
 
+# Load environment variables
 load_dotenv()
 
-# Load env variables
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 ALERT_CHANNEL_ID = int(os.getenv("ALERT_CHANNEL_ID"))
 
 BITGET_API_KEY = os.getenv("BITGET_API_KEY")
 BITGET_SECRET_KEY = os.getenv("BITGET_SECRET_KEY")
-BITGET_PASSPHRASE = os.getenv("BITGET_PASSPHRASE")
+BITGET_PASSPHRASE = os.getenv("BITGET_PASSPHRASE", "")
 TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", "200"))
 DEFAULT_LEVERAGE = int(os.getenv("LEVERAGE", "5"))
 
@@ -25,18 +25,23 @@ intents.messages = True
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-# Bitget signing method
+# ---- SIGNING ----
 def sign_bitget_request(secret, timestamp, method, path, body=''):
+    """Generate Bitget signature."""
     pre_hash = f"{timestamp}{method.upper()}{path}{body}"
-    return hmac.new(secret.encode(), pre_hash.encode(), hashlib.sha256).hexdigest()
+    signature = hmac.new(secret.encode(), pre_hash.encode(), hashlib.sha256).hexdigest()
+    return signature
 
-# Place order on Bitget
+# ---- ORDER PLACEMENT ----
 def place_futures_order(symbol, side, quantity, leverage):
-    url = "https://api.bitget.com/api/v2/mix/order/place-order"
-    timestamp = str(int(time.time() * 1000))
-    side = side.lower()
-    order_type = "market"  # could be "limit" if price added
+    """Place a futures market order on Bitget."""
+    base_url = "https://api.bitget.com"
     path = "/api/v2/mix/order/place-order"
+    url = base_url + path
+    timestamp = str(int(time.time() * 1000))
+
+    side = side.lower()  # 'buy' or 'sell'
+    order_type = "market"  # We use market orders
 
     body = {
         "symbol": symbol,
@@ -60,14 +65,15 @@ def place_futures_order(symbol, side, quantity, leverage):
     }
 
     try:
-        print(f"🛠 Sending Bitget Order: {body}")
+        print(f"📤 Sending Bitget Order: {body}")
         response = requests.post(url, headers=headers, data=body_str, timeout=30)
+        print(f"📥 Bitget Response: {response.text}")
         return response.json()
     except Exception as e:
         print(f"⚠️ Bitget request error: {e}")
         return {"error": str(e)}
 
-# Discord events
+# ---- DISCORD BOT EVENTS ----
 @client.event
 async def on_ready():
     print(f"✅ Logged in as {client.user}")
@@ -78,7 +84,7 @@ async def on_message(message):
         return
 
     if message.channel.id != ALERT_CHANNEL_ID:
-        print(f"🟨 Message received but ignored: Wrong channel ({message.channel.id})")
+        print(f"🟨 Message ignored: Wrong channel ({message.channel.id})")
         return
 
     content = message.content.upper()
@@ -87,7 +93,7 @@ async def on_message(message):
         try:
             parts = content.split()
             raw_symbol = parts[0].replace("PERP", "").replace("USDT", "")
-            symbol = raw_symbol + "USDT_UMCBL"
+            symbol = raw_symbol + "USDT_UMCBL"  # Bitget USDT-margined perpetual format
             side = "buy"
             leverage = DEFAULT_LEVERAGE
 
@@ -125,4 +131,5 @@ async def on_message(message):
         except Exception as e:
             await message.channel.send(f"⚠️ Error: {str(e)}")
 
+# Run the bot
 client.run(DISCORD_BOT_TOKEN)
