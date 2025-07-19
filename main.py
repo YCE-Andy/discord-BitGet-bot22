@@ -56,7 +56,7 @@ def place_futures_order(symbol, side, quantity, leverage):
     body_data = {
     "symbol": symbol,
     "marginCoin": "USDT",
-    "side": "open_long" if side.lower() == "buy" else "open_short",
+    "side": "buy" if side.lower() == "buy" else "sell"
     "orderType": "market",
     "size": str(quantity),
     "leverage": str(leverage),
