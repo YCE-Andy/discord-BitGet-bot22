@@ -7,76 +7,71 @@ import requests
 import discord
 import asyncio
 
-# Load environment variables
+# Load env vars
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 ALERT_CHANNEL_ID = int(os.getenv("ALERT_CHANNEL_ID"))
-
 BITGET_API_KEY = os.getenv("BITGET_API_KEY")
 BITGET_SECRET_KEY = os.getenv("BITGET_SECRET_KEY")
 BITGET_PASSPHRASE = os.getenv("BITGET_PASSPHRASE")
 
 TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", "200"))
 DEFAULT_LEVERAGE = int(os.getenv("LEVERAGE", "5"))
-
 BITGET_API_URL = "https://api.bitget.com"
 
-# Setup Discord client
 intents = discord.Intents.default()
 intents.messages = True
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-# Generate Bitget signature
-def generate_signature(timestamp, method, path, body):
-    if not body:
-        body = ""
-    pre_hash = f"{timestamp}{method.upper()}{path}{body}"
-    return hmac.new(BITGET_SECRET_KEY.encode(), pre_hash.encode(), hashlib.sha256).hexdigest()
+# Bitget Signature V2
+def generate_signature(timestamp, method, path, body_str):
+    pre_hash = f"{timestamp}{method.upper()}{path}{body_str}"
+    signature = hmac.new(
+        BITGET_SECRET_KEY.encode(),
+        pre_hash.encode(),
+        hashlib.sha256
+    ).hexdigest()
+    return signature
 
-# Prepare request headers
 def get_headers(method, path, body_str):
     timestamp = str(int(time.time() * 1000))
-    sign = generate_signature(timestamp, method, path, body_str)
+    signature = generate_signature(timestamp, method, path, body_str)
     return {
         "ACCESS-KEY": BITGET_API_KEY,
-        "ACCESS-SIGN": sign,
+        "ACCESS-SIGN": signature,
         "ACCESS-TIMESTAMP": timestamp,
         "ACCESS-PASSPHRASE": BITGET_PASSPHRASE,
         "Content-Type": "application/json"
     }
 
-# Place Bitget order
+# Bitget Order
 def place_futures_order(symbol, side, quantity, leverage):
     path = "/api/v2/mix/order/place-order"
     url = BITGET_API_URL + path
-
-    body = {
+    body_dict = {
         "symbol": symbol,
         "marginCoin": "USDT",
-        "side": "buy" if side.lower() == "buy" else "sell",
+        "side": "buy" if side == "buy" else "sell",
         "orderType": "market",
         "size": str(quantity),
         "leverage": str(leverage),
         "productType": "umcbl",
         "marginMode": "isolated"
     }
-
-    body_str = json.dumps(body)
+    body_str = json.dumps(body_dict, separators=(",", ":"))  # Minified for signature
     headers = get_headers("POST", path, body_str)
 
     try:
-        print(f"📤 Sending Bitget order: {body}")
+        print("📤 Placing order with body:", body_str)
         response = requests.post(url, headers=headers, data=body_str)
         return response.json()
     except Exception as e:
         return {"error": str(e)}
 
-# On ready
 @client.event
 async def on_ready():
     print(f"✅ Logged in as {client.user}")
 
-# Message handler
 @client.event
 async def on_message(message):
     if message.author.bot or message.channel.id != ALERT_CHANNEL_ID:
@@ -93,33 +88,29 @@ async def on_message(message):
             leverage = DEFAULT_LEVERAGE
 
             if "LEVERAGE" in parts:
+                i = parts.index("LEVERAGE")
                 try:
-                    lev_index = parts.index("LEVERAGE")
-                    leverage = int(parts[lev_index + 1].replace("X", ""))
+                    leverage = int(parts[i + 1].replace("X", ""))
                 except:
                     pass
 
-            buyzone_index = parts.index("BUYZONE")
-            entry_low = float(parts[buyzone_index + 1])
-            if parts[buyzone_index + 2] == "-":
-                entry_high = float(parts[buyzone_index + 3])
-            else:
-                entry_high = float(parts[buyzone_index + 2])
-
+            i = parts.index("BUYZONE")
+            entry_low = float(parts[i + 1])
+            entry_high = float(parts[i + 3]) if parts[i + 2] == "-" else float(parts[i + 2])
             entry_price = (entry_low + entry_high) / 2
             quantity = round(TRADE_AMOUNT / entry_price, 3)
 
             await message.channel.send(f"🔎 Symbol: `{symbol}`")
-            await message.channel.send(f"⚙️ Leverage: `x{leverage}`")
-            await message.channel.send(f"💰 Entry: `{entry_price}`")
+            await message.channel.send(f"⚙️ Leverage: `{leverage}`")
+            await message.channel.send(f"💰 Entry price: `{entry_price}`")
             await message.channel.send(f"📦 Quantity: `{quantity}`")
 
             result = place_futures_order(symbol, side, quantity, leverage)
 
             if result.get("code") == "00000":
-                await message.channel.send(f"✅ Order Placed: `{symbol}` at x{leverage}")
+                await message.channel.send(f"✅ Order placed successfully: `{symbol}`")
             else:
-                await message.channel.send(f"❌ Trade Failed:\n```{json.dumps(result, indent=2)}```")
+                await message.channel.send(f"❌ Trade failed:\n```{json.dumps(result, indent=2)}```")
 
         except Exception as e:
             await message.channel.send(f"⚠️ Error: {str(e)}")
