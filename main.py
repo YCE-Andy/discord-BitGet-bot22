@@ -15,6 +15,7 @@ BITGET_PASSPHRASE = os.getenv("BITGET_PASSPHRASE")
 def sign_bitget_request(secret, timestamp, method, path, body=''):
     """
     Bitget signature: HMAC_SHA256(timestamp + method + path + body)
+    DO NOT include query string (?productType=umcbl) in 'path'
     """
     raw = f"{timestamp}{method.upper()}{path}{body}"
     print("🔐 Raw string to sign:")
@@ -25,12 +26,12 @@ def test_bitget_auth():
     timestamp = str(int(time.time() * 1000))
     path = "/api/v2/mix/account/accounts"
     query = "?productType=umcbl"
-    full_path = path + query
-    url = f"https://api.bitget.com{full_path}"
-
+    full_url = f"https://api.bitget.com{path}{query}"
     method = "GET"
-    body = ""
-    signature = sign_bitget_request(BITGET_SECRET_KEY, timestamp, method, full_path, body)
+    body = ""  # GET request = no body
+
+    # ✅ Only path (no query) used in signature
+    signature = sign_bitget_request(BITGET_SECRET_KEY, timestamp, method, path, body)
 
     headers = {
         "ACCESS-KEY": BITGET_API_KEY,
@@ -41,16 +42,16 @@ def test_bitget_auth():
     }
 
     print("\n📤 Sending request to Bitget...")
-    print(f"➡️ URL: {url}")
+    print(f"➡️ URL: {full_url}")
     print(f"➡️ Headers: {headers}")
 
     try:
-        response = requests.get(url, headers=headers)
+        response = requests.get(full_url, headers=headers)
         print("\n📥 Bitget Response:")
         print(response.status_code)
         print(response.text)
     except Exception as e:
         print(f"❌ Request error: {e}")
 
-# 🔧 Run test
+# Run test
 test_bitget_auth()
