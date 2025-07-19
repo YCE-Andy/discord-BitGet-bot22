@@ -61,7 +61,8 @@ def place_futures_order(symbol, side, quantity, leverage):
     "size": str(quantity),
     "leverage": str(leverage),
     "productType": "umcbl",
-    "marginMode": "isolated"
+    "marginMode": "isolated",
+    "reduceOnly": False  # ✅ This tells Bitget you're opening a position
 }
     body_json = json.dumps(body_data)
     headers = get_headers("POST", path, body_json)
