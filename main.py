@@ -45,7 +45,7 @@ def get_headers(method, path, body=""):
     }
 
 def place_futures_order(symbol, side, quantity, leverage):
-    path = "/api/v2/mix/order/placeOrder"
+    path = "/api/v2/mix/order/place-order"
     url = BITGET_API_URL + path
     body_data = {
         "symbol": symbol,
