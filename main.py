@@ -10,9 +10,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ENV VARIABLES
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-SOURCE_CHANNEL_ID = os.getenv("SOURCE_CHANNEL_ID")
+SOURCE_CHANNEL_ID = int(os.getenv("SOURCE_CHANNEL_ID"))  # ✅ Keep as int
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 BITGET_API_KEY = os.getenv("BITGET_API_KEY")
@@ -21,15 +20,12 @@ BITGET_API_PASSPHRASE = os.getenv("BITGET_API_PASSPHRASE")
 TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", 100))
 DEFAULT_LEVERAGE = int(os.getenv("LEVERAGE", 5))
 
-# LOGGING SETUP
 logging.basicConfig(level=logging.INFO)
 
-# DISCORD CLIENT
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# BITGET API WRAPPER (Placeholder)
 class BitgetAPI:
     BASE_URL = "https://api.bitget.com"
 
@@ -70,7 +66,6 @@ class BitgetAPI:
         logging.info(f"Order response: {order}")
         return order
 
-# SIGNAL PARSER
 def parse_signal(content):
     try:
         lines = content.splitlines()
@@ -99,7 +94,6 @@ def parse_signal(content):
         logging.error(f"Failed to parse signal: {e}")
         return None
 
-# TELEGRAM ALERT
 async def send_telegram_alert(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     async with aiohttp.ClientSession() as session:
@@ -108,14 +102,13 @@ async def send_telegram_alert(message):
             "text": message
         })
 
-# DISCORD EVENTS
 @bot.event
 async def on_ready():
     logging.info(f"✅ Bot connected as {bot.user}")
 
 @bot.event
 async def on_message(message):
-    if str(message.channel.id) != SOURCE_CHANNEL_ID:
+    if message.channel.id != SOURCE_CHANNEL_ID:
         return
     if message.author.bot:
         return
@@ -147,5 +140,4 @@ async def on_message(message):
     bitget = BitgetAPI(BITGET_API_KEY, BITGET_API_SECRET, BITGET_API_PASSPHRASE)
     await bitget.place_order(symbol, side, leverage, entry_zone[0], stop, targets)
 
-# RUN BOT
 bot.run(DISCORD_BOT_TOKEN)
