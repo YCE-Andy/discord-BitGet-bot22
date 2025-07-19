@@ -7,7 +7,7 @@ import requests
 import discord
 import asyncio
 
-# Environment variables
+# ENV variables
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 ALERT_CHANNEL_ID = int(os.getenv("ALERT_CHANNEL_ID"))
 
@@ -28,16 +28,15 @@ client = discord.Client(intents=intents)
 # Signature generator
 def generate_signature(timestamp, method, path, body):
     if body == "{}":
-        body = ""  # Bitget requires empty string for empty body
+        body = ""
     pre_hash = f"{timestamp}{method.upper()}{path}{body}"
-    signature = hmac.new(
+    return hmac.new(
         BITGET_SECRET_KEY.encode(),
         pre_hash.encode(),
         hashlib.sha256
     ).hexdigest()
-    return signature
 
-# Header builder
+# Auth headers
 def get_headers(method, path, body):
     timestamp = str(int(time.time() * 1000))
     sign = generate_signature(timestamp, method, path, body)
@@ -49,12 +48,12 @@ def get_headers(method, path, body):
         "Content-Type": "application/json"
     }
 
-# Order sender
+# Place order
 def place_futures_order(symbol, side, quantity, leverage):
     path = "/api/v2/mix/order/place-order"
     url = BITGET_API_URL + path
 
-    payload = {
+    data = {
         "symbol": symbol,
         "marginCoin": "USDT",
         "side": "buy" if side.lower() == "buy" else "sell",
@@ -65,23 +64,22 @@ def place_futures_order(symbol, side, quantity, leverage):
         "marginMode": "isolated"
     }
 
-    body_str = json.dumps(payload, separators=(",", ":"))
-    headers = get_headers("POST", path, body_str)
+    body = json.dumps(data, separators=(",", ":"))
+    headers = get_headers("POST", path, body)
 
     try:
-        print(f"📤 Sending order: {body_str}")
-        response = requests.post(url, headers=headers, data=body_str)
+        print(f"📤 Placing order: {body}")
+        response = requests.post(url, headers=headers, data=body)
         print(f"📥 Response: {response.text}")
         return response.json()
     except Exception as e:
         return {"error": str(e)}
 
-# On ready
+# Discord events
 @client.event
 async def on_ready():
     print(f"✅ Logged in as {client.user}")
 
-# On message (trade relay logic)
 @client.event
 async def on_message(message):
     if message.author.bot or message.channel.id != ALERT_CHANNEL_ID:
@@ -89,7 +87,7 @@ async def on_message(message):
 
     content = message.content.upper()
     if "BUYZONE" in content and "TARGETS" in content and "STOP" in content:
-        await message.channel.send("🟨 Trade signal received")
+        await message.channel.send("🟨 Signal received")
         try:
             parts = content.split()
             raw_symbol = parts[0].replace("PERP", "").replace("USDT", "")
@@ -98,9 +96,9 @@ async def on_message(message):
             leverage = DEFAULT_LEVERAGE
 
             if "LEVERAGE" in parts:
+                i = parts.index("LEVERAGE")
                 try:
-                    lev_index = parts.index("LEVERAGE")
-                    leverage = int(parts[lev_index + 1].replace("X", ""))
+                    leverage = int(parts[i + 1].replace("X", ""))
                 except:
                     pass
 
@@ -125,5 +123,4 @@ async def on_message(message):
         except Exception as e:
             await message.channel.send(f"⚠️ Error: {str(e)}")
 
-# Start bot
 client.run(DISCORD_BOT_TOKEN)
