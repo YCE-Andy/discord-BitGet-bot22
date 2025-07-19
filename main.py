@@ -1,138 +1,150 @@
 import os
-import time
-import hmac
+import re
 import json
-import hashlib
-import base64
-import requests
-import discord
 import asyncio
+import logging
+import aiohttp
+import discord
+from discord.ext import commands
+from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ENV VARS
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-ALERT_CHANNEL_ID = int(os.getenv("ALERT_CHANNEL_ID"))
+SOURCE_CHANNEL_ID = int(os.getenv("SOURCE_CHANNEL_ID"))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
 BITGET_API_KEY = os.getenv("BITGET_API_KEY")
-BITGET_SECRET_KEY = os.getenv("BITGET_SECRET_KEY")
-BITGET_PASSPHRASE = os.getenv("BITGET_PASSPHRASE")
+BITGET_API_SECRET = os.getenv("BITGET_API_SECRET")
+BITGET_API_PASSPHRASE = os.getenv("BITGET_API_PASSPHRASE")
+TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", 100))
+DEFAULT_LEVERAGE = int(os.getenv("LEVERAGE", 5))
 
-TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", "200"))
-DEFAULT_LEVERAGE = int(os.getenv("LEVERAGE", "5"))
-
-BITGET_API_URL = "https://api.bitget.com"
+# LOGGING
+logging.basicConfig(level=logging.INFO)
 
 intents = discord.Intents.default()
-intents.message_content = True
-client = discord.Client(intents=intents)
+intents.messages = True
+bot = commands.Bot(command_prefix="!", intents=intents)
 
-# TELEGRAM ALERT
-def send_telegram_alert(message):
+# Bitget Futures API
+class BitgetAPI:
+    BASE_URL = "https://api.bitget.com"
+
+    def __init__(self, api_key, api_secret, passphrase):
+        self.api_key = api_key
+        self.api_secret = api_secret
+        self.passphrase = passphrase
+
+    async def _signed_request(self, method, path, payload=None):
+        # Placeholder for proper signing logic
+        async with aiohttp.ClientSession() as session:
+            url = f"{self.BASE_URL}{path}"
+            headers = {
+                "ACCESS-KEY": self.api_key,
+                "ACCESS-PASSPHRASE": self.passphrase,
+                "Content-Type": "application/json"
+            }
+            async with session.request(method, url, headers=headers, json=payload) as resp:
+                return await resp.json()
+
+    async def place_order(self, symbol, side, leverage, entry_price, stop_loss, take_profits):
+        # Adjust leverage
+        await self._signed_request("POST", "/api/mix/v1/account/setLeverage", {
+            "symbol": symbol,
+            "marginCoin": "USDT",
+            "leverage": str(leverage),
+            "holdSide": side.lower()
+        })
+
+        # Place market order
+        order = await self._signed_request("POST", "/api/mix/v1/order/placeOrder", {
+            "symbol": symbol,
+            "marginCoin": "USDT",
+            "size": TRADE_AMOUNT,
+            "side": side.lower(),
+            "orderType": "market",
+            "price": "",
+            "tradeSide": "open"
+        })
+
+        logging.info(f"Order response: {order}")
+        return order
+
+# Parse signal
+def parse_signal(content):
+    try:
+        lines = content.splitlines()
+        symbol_line = [l for l in lines if re.match(r'^[A-Z]+USDT', l)][0]
+        symbol = symbol_line.strip().replace("(SHORT)", "").strip()
+        direction = "SHORT" if "(SHORT)" in symbol_line else "LONG"
+        buyzone = re.findall(r"BUYZONE|SELLZONE\s+([\d\.]+)\s*-\s*([\d\.]+)", content, re.IGNORECASE)
+        targets = re.findall(r"TARGETS?\s*(.*?)\n", content, re.DOTALL | re.IGNORECASE)
+        stop = re.search(r"STOP\s*([\d\.]+)", content, re.IGNORECASE)
+        leverage = re.search(r"LEVERAGE\s*x?(\d+)", content, re.IGNORECASE)
+
+        zone = tuple(map(float, buyzone[0])) if buyzone else (None, None)
+        target_vals = [float(t) for t in re.findall(r"[\d\.]+", targets[0])] if targets else []
+        stop_val = float(stop.group(1)) if stop else None
+        lev = int(leverage.group(1)) if leverage else DEFAULT_LEVERAGE
+
+        return {
+            "symbol": symbol,
+            "direction": direction,
+            "buyzone": zone,
+            "targets": target_vals[:4],
+            "stop": stop_val,
+            "leverage": lev
+        }
+    except Exception as e:
+        logging.error(f"Failed to parse signal: {e}")
+        return None
+
+# Telegram alert
+async def send_telegram_alert(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
-    try:
-        requests.post(url, json=payload)
-    except Exception as e:
-        print(f"❌ Telegram alert error: {e}")
+    async with aiohttp.ClientSession() as session:
+        await session.post(url, data={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message
+        })
 
-# SIGNATURE
-def generate_signature(timestamp, method, request_path, body):
-    pre_hash = f"{timestamp}{method.upper()}{request_path}{body}"
-    digest = hmac.new(BITGET_SECRET_KEY.encode(), pre_hash.encode(), hashlib.sha256).digest()
-    return base64.b64encode(digest).decode()
-
-def get_headers(method, path, body=""):
-    timestamp = str(int(time.time() * 1000))
-    sign = generate_signature(timestamp, method, path, body)
-    return {
-        "ACCESS-KEY": BITGET_API_KEY,
-        "ACCESS-SIGN": sign,
-        "ACCESS-TIMESTAMP": timestamp,
-        "ACCESS-PASSPHRASE": BITGET_PASSPHRASE,
-        "Content-Type": "application/json"
-    }
-
-def place_market_order(symbol, side, quantity, leverage):
-    path = "/api/v2/mix/order/place-order"
-    url = BITGET_API_URL + path
-    data = {
-        "symbol": symbol,
-        "marginCoin": "USDT",
-        "side": side,
-        "orderType": "market",
-        "size": str(quantity),
-        "leverage": str(leverage),
-        "productType": "umcbl",
-        "marginMode": "isolated"
-    }
-    headers = get_headers("POST", path, json.dumps(data))
-    try:
-        resp = requests.post(url, headers=headers, json=data)
-        return resp.json()
-    except Exception as e:
-        return {"error": str(e)}
-
-@client.event
+# Discord event
+@bot.event
 async def on_ready():
-    print(f"✅ Logged in as {client.user}")
+    logging.info(f"Logged in as {bot.user}")
 
-@client.event
+@bot.event
 async def on_message(message):
-    if message.author.bot or message.channel.id != ALERT_CHANNEL_ID:
+    if message.channel.id != SOURCE_CHANNEL_ID or message.author.bot:
         return
 
-    content = message.content.upper()
-    if not (("BUYZONE" in content or "SELLZONE" in content) and "TARGETS" in content and "STOP" in content):
+    parsed = parse_signal(message.content)
+    if not parsed:
         return
 
-    await message.channel.send("🟨 Signal received")
-    send_telegram_alert("🟨 Signal received")
+    direction = parsed['direction']
+    symbol = parsed['symbol']
+    side = "open_long" if direction == "LONG" else "open_short"
+    leverage = parsed['leverage']
+    entry_zone = parsed['buyzone']
+    targets = parsed['targets']
+    stop = parsed['stop']
 
-    try:
-        parts = content.split()
-        symbol = parts[0].replace("PERP", "").replace("USDT", "") + "USDT"
-        side = "buy" if "BUYZONE" in content else "sell"
-        leverage = DEFAULT_LEVERAGE
+    alert_msg = (
+        f"🔔 {direction} TRADE SIGNAL 🔔\n"
+        f"Pair: {symbol}\n"
+        f"Buy Zone: {entry_zone[0]} - {entry_zone[1]}\n"
+        f"Targets: {targets}\n"
+        f"Stop Loss: {stop}\n"
+        f"Leverage: x{leverage}"
+    )
+    await send_telegram_alert(alert_msg)
 
-        if "LEVERAGE" in parts:
-            i = parts.index("LEVERAGE")
-            try:
-                leverage = int(parts[i + 1].replace("X", ""))
-            except:
-                pass
+    bitget = BitgetAPI(BITGET_API_KEY, BITGET_API_SECRET, BITGET_API_PASSPHRASE)
+    await bitget.place_order(symbol, side, leverage, entry_zone[0], stop, targets)
 
-        zone_idx = parts.index("BUYZONE") if "BUYZONE" in parts else parts.index("SELLZONE")
-        entry_low = float(parts[zone_idx + 1])
-        entry_high = float(parts[zone_idx + 3]) if parts[zone_idx + 2] == "-" else float(parts[zone_idx + 2])
-        entry_price = (entry_low + entry_high) / 2
-        quantity = round(TRADE_AMOUNT / entry_price, 3)
-
-        stop_idx = parts.index("STOP")
-        stop_price = float(parts[stop_idx + 1])
-
-        target_idx = parts.index("TARGETS")
-        targets = []
-        for i in range(target_idx + 1, len(parts)):
-            if parts[i].replace(".", "", 1).isdigit():
-                targets.append(float(parts[i]))
-            else:
-                break
-        targets = targets[:4]
-
-        # Execute order
-        await message.channel.send(f"📤 {side.upper()} {symbol} @ {entry_price} x{leverage} for {quantity}")
-        result = place_market_order(symbol, side, quantity, leverage)
-
-        if result.get("code") == "00000":
-            await message.channel.send(f"✅ Order placed.")
-            send_telegram_alert(f"✅ Bitget Order Placed\n{symbol} {side.upper()} x{leverage}\nEntry: {entry_price}\nTPs: {targets}\nSL: {stop_price}")
-        else:
-            await message.channel.send(f"❌ Trade failed: {result}")
-            send_telegram_alert(f"❌ Trade failed: {result}")
-
-    except Exception as e:
-        await message.channel.send(f"⚠️ Error: {e}")
-        send_telegram_alert(f"⚠️ Error: {e}")
-
-client.run(DISCORD_BOT_TOKEN)
+# Run bot
+bot.run(DISCORD_BOT_TOKEN)
