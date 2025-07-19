@@ -67,7 +67,7 @@ def place_futures_order(symbol, side, quantity, leverage):
     for attempt in range(3):
         try:
             print(f"📤 Placing Bitget order: {body_json}")
-            response = requests.post(url, headers=headers, data=body_json)
+            response = requests.post(url, headers=headers, json=body_data)
             return response.json()
         except Exception as e:
             print(f"⚠️ Bitget API call failed (attempt {attempt+1}): {e}")
