@@ -6,71 +6,68 @@ import hashlib
 import requests
 import discord
 import asyncio
+from dotenv import load_dotenv
 
+load_dotenv()
+
+# Load env variables
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 ALERT_CHANNEL_ID = int(os.getenv("ALERT_CHANNEL_ID"))
 
-MEXC_API_KEY = os.getenv("MEXC_API_KEY")
-MEXC_SECRET_KEY = os.getenv("MEXC_SECRET_KEY")
+BITGET_API_KEY = os.getenv("BITGET_API_KEY")
+BITGET_SECRET_KEY = os.getenv("BITGET_SECRET_KEY")
+BITGET_PASSPHRASE = os.getenv("BITGET_PASSPHRASE")
 TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", "200"))
 DEFAULT_LEVERAGE = int(os.getenv("LEVERAGE", "5"))
-
-API_BASE = "https://contract.mexc.com"
 
 intents = discord.Intents.default()
 intents.messages = True
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-def sign_request(params, secret):
-    sorted_params = sorted(params.items())
-    query_string = "&".join(f"{k}={v}" for k, v in sorted_params)
-    signature = hmac.new(secret.encode(), query_string.encode(), hashlib.sha256).hexdigest()
-    return signature
+# Bitget signing method
+def sign_bitget_request(secret, timestamp, method, path, body=''):
+    pre_hash = f"{timestamp}{method.upper()}{path}{body}"
+    return hmac.new(secret.encode(), pre_hash.encode(), hashlib.sha256).hexdigest()
 
-def get_symbol_precision(symbol):
-    try:
-        url = f"{API_BASE}/api/v1/contract/detail"
-        response = requests.get(url, timeout=10)
-        data = response.json()
-        for item in data["data"]:
-            if item["symbol"] == symbol:
-                return item["priceScale"], item["volScale"]
-    except Exception as e:
-        print(f"❌ Precision fetch error: {e}")
-    return None, None
-
+# Place order on Bitget
 def place_futures_order(symbol, side, quantity, leverage):
-    path = "/api/v1/private/order/submit"
-    url = API_BASE + path
-    timestamp = int(time.time() * 1000)
+    url = "https://api.bitget.com/api/v2/mix/order/place-order"
+    timestamp = str(int(time.time() * 1000))
+    side = side.lower()
+    order_type = "market"  # could be "limit" if price added
+    path = "/api/v2/mix/order/place-order"
 
-    params = {
-        "api_key": MEXC_API_KEY,
-        "req_time": timestamp,
-        "market": symbol,
-        "price": 0,
-        "vol": quantity,
-        "side": 1 if side.lower() == "buy" else 2,
-        "type": 1,
-        "open_type": 1,
-        "position_id": 0,
-        "leverage": leverage,
-        "external_oid": str(timestamp)
+    body = {
+        "symbol": symbol,
+        "marginCoin": "USDT",
+        "size": str(quantity),
+        "side": side,
+        "orderType": order_type,
+        "force": "gtc",
+        "leverage": str(leverage)
     }
-    params["sign"] = sign_request(params, MEXC_SECRET_KEY)
-    headers = {"Content-Type": "application/json"}
 
-    for attempt in range(3):
-        try:
-            print(f"🛠 Sending order: {params}")
-            response = requests.post(url, headers=headers, json=params, timeout=30)
-            return response.json()
-        except Exception as e:
-            print(f"⚠️ Attempt {attempt+1} failed: {e}")
-            time.sleep(3)
-    return {"error": f"MEXC request error: All attempts failed"}
+    body_str = json.dumps(body, separators=(',', ':'))
+    signature = sign_bitget_request(BITGET_SECRET_KEY, timestamp, "POST", path, body_str)
 
+    headers = {
+        "ACCESS-KEY": BITGET_API_KEY,
+        "ACCESS-SIGN": signature,
+        "ACCESS-TIMESTAMP": timestamp,
+        "ACCESS-PASSPHRASE": BITGET_PASSPHRASE,
+        "Content-Type": "application/json"
+    }
+
+    try:
+        print(f"🛠 Sending Bitget Order: {body}")
+        response = requests.post(url, headers=headers, data=body_str, timeout=30)
+        return response.json()
+    except Exception as e:
+        print(f"⚠️ Bitget request error: {e}")
+        return {"error": str(e)}
+
+# Discord events
 @client.event
 async def on_ready():
     print(f"✅ Logged in as {client.user}")
@@ -90,7 +87,7 @@ async def on_message(message):
         try:
             parts = content.split()
             raw_symbol = parts[0].replace("PERP", "").replace("USDT", "")
-            symbol = raw_symbol + "_USDT"
+            symbol = raw_symbol + "USDT_UMCBL"
             side = "buy"
             leverage = DEFAULT_LEVERAGE
 
@@ -109,28 +106,21 @@ async def on_message(message):
                 entry_high = float(parts[i + 2])
 
             entry_price = (entry_low + entry_high) / 2
-            price_precision, vol_precision = get_symbol_precision(symbol)
-
-            if price_precision is None or vol_precision is None:
-                await message.channel.send(f"❌ Unknown symbol or failed to fetch precision: {symbol}")
-                return
-
-            quantity = round(TRADE_AMOUNT / entry_price, vol_precision)
+            quantity = round(TRADE_AMOUNT / entry_price, 2)
 
             await message.channel.send(f"🔎 Parsed symbol: {symbol}")
             await message.channel.send(f"⚙️ Leverage detected: x{leverage}")
             await message.channel.send(f"💰 Entry price: {entry_price}")
-            await message.channel.send(f"📐 Precision: price={price_precision}, vol={vol_precision}")
             await message.channel.send(f"📦 Quantity: {quantity}")
 
             result = place_futures_order(symbol, side, quantity, leverage)
 
-            if result.get("success"):
+            if result.get("code") == "00000":
                 await message.channel.send(f"✅ Trade Executed: {symbol} x{leverage}")
             else:
                 await message.channel.send(f"❌ Trade Failed: {result}")
 
-            await asyncio.sleep(1)  # Let Discord send
+            await asyncio.sleep(1)
 
         except Exception as e:
             await message.channel.send(f"⚠️ Error: {str(e)}")
