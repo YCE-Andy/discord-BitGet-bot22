@@ -95,7 +95,7 @@ async def on_message(message):
         try:
             parts = content.split()
             raw_symbol = parts[0].replace("PERP", "").replace("USDT", "")
-            symbol = f"{raw_symbol}_USDT"
+            symbol = f"{raw_symbol}USDT"
             side = "buy"
             leverage = DEFAULT_LEVERAGE
 
