@@ -54,14 +54,15 @@ def place_futures_order(symbol, side, quantity, leverage):
     path = "/api/v2/mix/order/place-order"
     url = BITGET_API_URL + path
     body_data = {
-        "symbol": symbol,
-        "marginCoin": "USDT",
-        "side": "open_long" if side.lower() == "buy" else "open_short",
-        "orderType": "market",
-        "size": str(quantity),
-        "leverage": str(leverage),
-        "productType": "umcbl"
-    }
+    "symbol": symbol,
+    "marginCoin": "USDT",
+    "side": "open_long" if side.lower() == "buy" else "open_short",
+    "orderType": "market",
+    "size": str(quantity),
+    "leverage": str(leverage),
+    "productType": "umcbl",
+    "marginMode": "cross"  # ✅ ADD THIS LINE
+}
     body_json = json.dumps(body_data)
     headers = get_headers("POST", path, body_json)
 
