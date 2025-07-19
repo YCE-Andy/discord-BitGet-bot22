@@ -3,11 +3,12 @@ import time
 import hmac
 import json
 import hashlib
-import base64  # ✅ ADD THIS
+import base64
 import requests
 import discord
 import asyncio
 
+# Load environment variables
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 ALERT_CHANNEL_ID = int(os.getenv("ALERT_CHANNEL_ID"))
 
@@ -20,20 +21,23 @@ DEFAULT_LEVERAGE = int(os.getenv("LEVERAGE", "5"))
 
 BITGET_API_URL = "https://api.bitget.com"
 
+# Discord client setup
 intents = discord.Intents.default()
 intents.messages = True
 intents.message_content = True
 client = discord.Client(intents=intents)
 
+# Signature generator
 def generate_signature(timestamp, method, request_path, body):
     pre_hash = f"{timestamp}{method.upper()}{request_path}{body}"
-    signature = hmac.new(
+    hmac_digest = hmac.new(
         BITGET_SECRET_KEY.encode(),
         pre_hash.encode(),
         hashlib.sha256
-    ).hexdigest()
-    return signature
+    ).digest()
+    return base64.b64encode(hmac_digest).decode()
 
+# Auth headers
 def get_headers(method, path, body=""):
     timestamp = str(int(time.time() * 1000))
     sign = generate_signature(timestamp, method, path, body)
@@ -45,6 +49,7 @@ def get_headers(method, path, body=""):
         "Content-Type": "application/json"
     }
 
+# Place futures order
 def place_futures_order(symbol, side, quantity, leverage):
     path = "/api/v2/mix/order/place-order"
     url = BITGET_API_URL + path
@@ -63,13 +68,14 @@ def place_futures_order(symbol, side, quantity, leverage):
     for attempt in range(3):
         try:
             print(f"📤 Placing Bitget order: {body_json}")
-            response = requests.post(url, headers=headers, data=body_json)
+            response = requests.post(url, headers=headers, json=body_data)  # ✅ JSON body
             return response.json()
         except Exception as e:
             print(f"⚠️ Bitget API call failed (attempt {attempt+1}): {e}")
             time.sleep(3)
     return {"error": "All attempts to place order failed."}
 
+# Discord bot event handlers
 @client.event
 async def on_ready():
     print(f"✅ Logged in as {client.user}")
@@ -120,4 +126,5 @@ async def on_message(message):
         except Exception as e:
             await message.channel.send(f"⚠️ Error: {str(e)}")
 
+# Start bot
 client.run(DISCORD_BOT_TOKEN)
