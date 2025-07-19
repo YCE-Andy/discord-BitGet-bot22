@@ -6,14 +6,13 @@ import logging
 import aiohttp
 import discord
 from discord.ext import commands
-from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# ENV VARS
+# ENV VARIABLES
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-SOURCE_CHANNEL_ID = int(os.getenv("SOURCE_CHANNEL_ID"))
+SOURCE_CHANNEL_ID = os.getenv("SOURCE_CHANNEL_ID")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 BITGET_API_KEY = os.getenv("BITGET_API_KEY")
@@ -22,14 +21,15 @@ BITGET_API_PASSPHRASE = os.getenv("BITGET_API_PASSPHRASE")
 TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", 100))
 DEFAULT_LEVERAGE = int(os.getenv("LEVERAGE", 5))
 
-# LOGGING
+# LOGGING SETUP
 logging.basicConfig(level=logging.INFO)
 
+# DISCORD CLIENT
 intents = discord.Intents.default()
-intents.messages = True
+intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Bitget Futures API
+# BITGET API WRAPPER (Placeholder)
 class BitgetAPI:
     BASE_URL = "https://api.bitget.com"
 
@@ -39,7 +39,6 @@ class BitgetAPI:
         self.passphrase = passphrase
 
     async def _signed_request(self, method, path, payload=None):
-        # Placeholder for proper signing logic
         async with aiohttp.ClientSession() as session:
             url = f"{self.BASE_URL}{path}"
             headers = {
@@ -51,7 +50,6 @@ class BitgetAPI:
                 return await resp.json()
 
     async def place_order(self, symbol, side, leverage, entry_price, stop_loss, take_profits):
-        # Adjust leverage
         await self._signed_request("POST", "/api/mix/v1/account/setLeverage", {
             "symbol": symbol,
             "marginCoin": "USDT",
@@ -59,7 +57,6 @@ class BitgetAPI:
             "holdSide": side.lower()
         })
 
-        # Place market order
         order = await self._signed_request("POST", "/api/mix/v1/order/placeOrder", {
             "symbol": symbol,
             "marginCoin": "USDT",
@@ -73,28 +70,28 @@ class BitgetAPI:
         logging.info(f"Order response: {order}")
         return order
 
-# Parse signal
+# SIGNAL PARSER
 def parse_signal(content):
     try:
         lines = content.splitlines()
         symbol_line = [l for l in lines if re.match(r'^[A-Z]+USDT', l)][0]
         symbol = symbol_line.strip().replace("(SHORT)", "").strip()
-        direction = "SHORT" if "(SHORT)" in symbol_line else "LONG"
-        buyzone = re.findall(r"BUYZONE|SELLZONE\s+([\d\.]+)\s*-\s*([\d\.]+)", content, re.IGNORECASE)
-        targets = re.findall(r"TARGETS?\s*(.*?)\n", content, re.DOTALL | re.IGNORECASE)
+        direction = "SHORT" if "(SHORT)" in symbol_line.upper() else "LONG"
+        buyzone = re.findall(r"(?:BUYZONE|SELLZONE)\s+([\d\.]+)\s*-\s*([\d\.]+)", content, re.IGNORECASE)
+        targets_raw = re.search(r"TARGETS\s*((?:\s*[\d\.]+\s*)+)", content, re.IGNORECASE)
         stop = re.search(r"STOP\s*([\d\.]+)", content, re.IGNORECASE)
         leverage = re.search(r"LEVERAGE\s*x?(\d+)", content, re.IGNORECASE)
 
-        zone = tuple(map(float, buyzone[0])) if buyzone else (None, None)
-        target_vals = [float(t) for t in re.findall(r"[\d\.]+", targets[0])] if targets else []
+        entry_zone = tuple(map(float, buyzone[0])) if buyzone else (None, None)
+        targets = [float(t) for t in re.findall(r"[\d\.]+", targets_raw.group(1))] if targets_raw else []
         stop_val = float(stop.group(1)) if stop else None
         lev = int(leverage.group(1)) if leverage else DEFAULT_LEVERAGE
 
         return {
             "symbol": symbol,
             "direction": direction,
-            "buyzone": zone,
-            "targets": target_vals[:4],
+            "buyzone": entry_zone,
+            "targets": targets[:4],
             "stop": stop_val,
             "leverage": lev
         }
@@ -102,7 +99,7 @@ def parse_signal(content):
         logging.error(f"Failed to parse signal: {e}")
         return None
 
-# Telegram alert
+# TELEGRAM ALERT
 async def send_telegram_alert(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     async with aiohttp.ClientSession() as session:
@@ -111,18 +108,21 @@ async def send_telegram_alert(message):
             "text": message
         })
 
-# Discord event
+# DISCORD EVENTS
 @bot.event
 async def on_ready():
-    logging.info(f"Logged in as {bot.user}")
+    logging.info(f"✅ Bot connected as {bot.user}")
 
 @bot.event
 async def on_message(message):
-    if message.channel.id != SOURCE_CHANNEL_ID or message.author.bot:
+    if str(message.channel.id) != SOURCE_CHANNEL_ID:
+        return
+    if message.author.bot:
         return
 
     parsed = parse_signal(message.content)
     if not parsed:
+        logging.info("No valid trade signal detected.")
         return
 
     direction = parsed['direction']
@@ -134,8 +134,9 @@ async def on_message(message):
     stop = parsed['stop']
 
     alert_msg = (
-        f"🔔 {direction} TRADE SIGNAL 🔔\n"
+        f"📊 TRADE SIGNAL RECEIVED 📊\n"
         f"Pair: {symbol}\n"
+        f"Direction: {direction}\n"
         f"Buy Zone: {entry_zone[0]} - {entry_zone[1]}\n"
         f"Targets: {targets}\n"
         f"Stop Loss: {stop}\n"
@@ -146,5 +147,5 @@ async def on_message(message):
     bitget = BitgetAPI(BITGET_API_KEY, BITGET_API_SECRET, BITGET_API_PASSPHRASE)
     await bitget.place_order(symbol, side, leverage, entry_zone[0], stop, targets)
 
-# Run bot
+# RUN BOT
 bot.run(DISCORD_BOT_TOKEN)
