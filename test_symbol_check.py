@@ -1,16 +1,15 @@
-import ccxt
+import requests
 
-exchange = ccxt.mexc({
-    'options': {
-        'defaultType': 'swap',  # Use USDT-M futures
-    }
-})
+symbol = "MANAUSDT_UMCBL"  # Bitget futures symbol format
 
-exchange.load_markets()
+url = "https://api.bitget.com/api/v2/mix/market/contracts?productType=umcbl"
 
-symbol = "MANA/USDT:USDT"
+response = requests.get(url)
+data = response.json()
 
-if symbol in exchange.markets:
-    print(f"✅ {symbol} is available on MEXC futures")
+available_symbols = [item["symbol"] for item in data["data"]]
+
+if symbol in available_symbols:
+    print(f"✅ {symbol} is available on Bitget USDT futures")
 else:
-    print(f"❌ {symbol} is NOT available on MEXC futures")
+    print(f"❌ {symbol} is NOT available on Bitget USDT futures")
