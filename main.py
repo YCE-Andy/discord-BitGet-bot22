@@ -3,6 +3,7 @@ import time
 import hmac
 import json
 import hashlib
+import base64  # ✅ ADD THIS
 import requests
 import discord
 import asyncio
