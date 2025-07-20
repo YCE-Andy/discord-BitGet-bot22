@@ -144,12 +144,11 @@ async def on_message(message):
 
             meta = get_symbol_meta(symbol)
             if not meta:
-            await message.channel.send(f"❌ Symbol not found in Bitget metadata: {symbol}")
-            return
+                await message.channel.send(f"❌ Error: Symbol metadata not found for {symbol}")
+                return
 
             min_size = float(meta.get("minTradeNum", 0.001))
             size_precision = int(meta.get("priceScale", 3))
-
             quantity = max(round(raw_qty, size_precision), min_size)
 
             await message.channel.send(f"🔎 Symbol: {symbol}")
