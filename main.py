@@ -1,122 +1,113 @@
 import os
-import discord
 import re
-import requests
 import json
-from decimal import Decimal, ROUND_DOWN
+import time
+import hmac
+import hashlib
+import asyncio
+import aiohttp
+import discord
+from discord.ext import tasks
+from dotenv import load_dotenv
 
-intents = discord.Intents.default()
-intents.message_content = True
-client = discord.Client(intents=intents)
+load_dotenv()
 
+DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+SOURCE_CHANNEL_ID = int(os.getenv("SOURCE_CHANNEL_ID"))
+TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", 200))
 BITGET_API_KEY = os.getenv("BITGET_API_KEY")
-BITGET_API_SECRET = os.getenv("BITGET_API_SECRET")
-BITGET_API_PASSPHRASE = os.getenv("BITGET_API_PASSPHRASE")
-DISCORD_RELAY_CHANNEL_ID = int(os.getenv("DISCORD_RELAY_CHANNEL_ID"))
-TRADE_AMOUNT_USDT = Decimal(os.getenv("TRADE_AMOUNT", "200"))
-DEFAULT_LEVERAGE = int(os.getenv("LEVERAGE", "5"))
+BITGET_SECRET_KEY = os.getenv("BITGET_SECRET_KEY")
+BITGET_PASSPHRASE = os.getenv("BITGET_PASSPHRASE")
+
+client = discord.Client(intents=discord.Intents.all())
 
 API_URL = "https://api.bitget.com"
 HEADERS = {
-    'Content-Type': 'application/json',
-    'ACCESS-KEY': BITGET_API_KEY,
-    'ACCESS-PASSPHRASE': BITGET_API_PASSPHRASE,
-    # Normally you'd also include signature headers here, but skipping for now.
+    "Content-Type": "application/json",
+    "ACCESS-KEY": BITGET_API_KEY,
+    "ACCESS-PASSPHRASE": BITGET_PASSPHRASE
 }
 
-def extract_trade_details(message):
-    try:
-        lines = message.content.splitlines()
-        symbol_line = next(line for line in lines if re.search(r'USDT', line, re.IGNORECASE))
-        side = 'buy' if '(SHORT)' not in symbol_line.upper() else 'sell'
+# === BITGET SIGNING ===
+def bitget_signature(timestamp, method, request_path, body):
+    message = f'{timestamp}{method}{request_path}{body}'
+    signature = hmac.new(BITGET_SECRET_KEY.encode(), message.encode(), hashlib.sha256).hexdigest()
+    return signature
 
-        match_symbol = re.search(r'(\w+USDT)', symbol_line.upper())
-        symbol = match_symbol.group(1) if match_symbol else None
-
-        buyzone = next(line for line in lines if 'BUYZONE' in line.upper() or 'SELLZONE' in line.upper())
-        targets_index = lines.index(next(line for line in lines if 'TARGETS' in line.upper()))
-        targets = [float(lines[i]) for i in range(targets_index+1, targets_index+6) if re.match(r'^\d+\.\d+', lines[i])]
-
-        stop_line = next(line for line in lines if 'STOP' in line.upper())
-        stop_price = float(re.search(r'\d+\.\d+', stop_line).group())
-
-        leverage_line = next((line for line in lines if 'LEVERAGE' in line.upper()), None)
-        leverage = int(re.search(r'x(\d+)', leverage_line).group(1)) if leverage_line else DEFAULT_LEVERAGE
-
-        return {
-            'symbol': symbol,
-            'side': side,
-            'targets': targets,
-            'stop_price': stop_price,
-            'leverage': leverage
-        }
-    except Exception as e:
-        print(f"❌ Error extracting trade details: {e}")
-        return None
-
-def place_market_order(trade):
-    url = f"{API_URL}/api/v2/mix/order/place-order"
-    payload = {
-        "symbol": trade['symbol'] + "_UMCBL",
+async def place_market_order(symbol, side, size):
+    timestamp = str(int(time.time() * 1000))
+    path = "/api/v2/mix/order/place-order"
+    url = API_URL + path
+    body = {
+        "symbol": symbol,
         "marginCoin": "USDT",
-        "size": "0.05",  # Just placeholder, usually this should be based on market precision
-        "side": trade['side'],
-        "orderType": "market",
-        "force": "gtc",
-    }
-    response = requests.post(url, headers=HEADERS, data=json.dumps(payload))
-    return response.json()
-
-def place_plan_order(symbol, trigger_price, order_price, side, plan_type):
-    url = f"{API_URL}/api/v2/mix/order/place-plan-order"
-    payload = {
-        "symbol": symbol + "_UMCBL",
-        "marginCoin": "USDT",
-        "size": "0.05",  # Placeholder
+        "size": str(size),
+        "price": "",
         "side": side,
-        "orderType": "limit",
-        "triggerPrice": str(trigger_price),
-        "executePrice": str(order_price),
-        "triggerType": "mark_price",
-        "planType": plan_type,
-        "marginMode": "isolated",
-        "productType": "umcbl"
+        "orderType": "market",
+        "marketType": "futures",
+        "productType": "umcbl",
+        "marginMode": "isolated"
     }
-    response = requests.post(url, headers=HEADERS, data=json.dumps(payload))
-    return response.json()
+    json_body = json.dumps(body)
+    signature = bitget_signature(timestamp, "POST", path, json_body)
+    HEADERS.update({
+        "ACCESS-TIMESTAMP": timestamp,
+        "ACCESS-SIGN": signature
+    })
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=HEADERS, data=json_body) as resp:
+            response = await resp.json()
+            return response
 
 @client.event
 async def on_ready():
-    print(f'Logged in as {client.user}')
+    print(f'✅ Logged in as {client.user}')
 
 @client.event
 async def on_message(message):
-    if message.channel.id != DISCORD_RELAY_CHANNEL_ID:
-        return
-    if not any(keyword in message.content.upper() for keyword in ['BUYZONE', 'SELLZONE']):
+    if message.channel.id != SOURCE_CHANNEL_ID or message.author == client.user:
         return
 
-    trade = extract_trade_details(message)
-    if not trade:
+    content = message.content.upper()
+    print("🟨 Signal received")
+
+    symbol_match = re.search(r"(\w+USDT)", content)
+    buyzone_match = re.search(r"BUYZONE\s+(\d+\.?\d*)\s*-\s*(\d+\.?\d*)", content)
+    targets_match = re.findall(r"TARGETS[\s\n]+((?:\d+\.?\d*\s*)+)", content)
+    stop_match = re.search(r"STOP\s+(\d+\.?\d*)", content)
+    leverage_match = re.search(r"LEVERAGE\s*X?(\d+)", content)
+
+    if not (symbol_match and buyzone_match and targets_match and stop_match):
+        print("❌ Error: Could not parse all required signal fields.")
         return
 
-    confirmation = f"🟨 Signal received\n"
-    order_result = place_market_order(trade)
+    raw_symbol = symbol_match.group(1)
+    buyzone_low = float(buyzone_match.group(1))
+    buyzone_high = float(buyzone_match.group(2))
+    stop_price = float(stop_match.group(1))
+    leverage = int(leverage_match.group(1)) if leverage_match else 5
 
-    if order_result.get('code') == '00000':
-        confirmation += f"✅ Bitget Order Placed: {trade['symbol']} x{trade['leverage']} [{'BUY' if trade['side']=='buy' else 'SELL'}]\n"
-        
-        # Place TP
-        for target in trade['targets']:
-            tp_result = place_plan_order(trade['symbol'], target, target, 'sell' if trade['side'] == 'buy' else 'buy', 'profit_plan')
-            confirmation += f"📈 TP @{target}: {tp_result}\n"
+    targets = [float(t) for t in re.findall(r"\d+\.?\d*", targets_match[0])][:5]
+    tp_percents = [0.5, 0.2, 0.15, 0.1, 0.05]
 
-        # Place SL
-        sl_result = place_plan_order(trade['symbol'], trade['stop_price'], trade['stop_price'], 'sell' if trade['side'] == 'buy' else 'buy', 'loss_plan')
-        confirmation += f"🛑 SL @{trade['stop_price']}: {sl_result}\n"
+    symbol = raw_symbol
+    size = round(TRADE_AMOUNT / ((buyzone_low + buyzone_high) / 2), 3)
+
+    # Entry
+    side = "buy" if "SHORT" not in content else "sell"
+    order = await place_market_order(symbol, side, size)
+
+    if order.get("code") == "00000":
+        print(f"✅ Bitget Order Placed: {symbol} x{leverage} [{side.upper()}]")
     else:
-        confirmation += f"❌ Trade Failed: {order_result}\n"
+        print(f"❌ Trade Failed: {order}")
+        return
 
-    await message.channel.send(confirmation)
+    # TP/SL placeholders (until we rewrite this with working Bitget V2 plan orders)
+    for i, tp in enumerate(targets):
+        print(f"📈 TP @{tp}: ❌ Plan not placed (awaiting working V2 logic)")
 
-client.run(os.getenv("DISCORD_BOT_TOKEN"))
+    print(f"🛑 SL @{stop_price}: ❌ Plan not placed (awaiting working V2 logic)")
+
+client.run(DISCORD_BOT_TOKEN)
