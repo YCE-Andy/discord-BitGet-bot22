@@ -76,7 +76,7 @@ def place_tp_sl(symbol, marginCoin, tp_levels, sl_price, is_long):
 
 intents = Intents.default()
 intents.message_content = True
-client = discord.Client(intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents)
 
 @client.event
 async def on_ready():
