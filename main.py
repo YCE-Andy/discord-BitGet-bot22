@@ -1,14 +1,14 @@
 import os
 import time
-import hmac
 import json
-import hashlib
+import hmac
 import base64
+import hashlib
 import requests
 import discord
 import asyncio
+from decimal import Decimal, ROUND_DOWN
 
-# Load environment variables
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 ALERT_CHANNEL_ID = int(os.getenv("ALERT_CHANNEL_ID"))
 
@@ -16,24 +16,22 @@ BITGET_API_KEY = os.getenv("BITGET_API_KEY")
 BITGET_SECRET_KEY = os.getenv("BITGET_SECRET_KEY")
 BITGET_PASSPHRASE = os.getenv("BITGET_PASSPHRASE")
 
-TRADE_PERCENT = 0.2  # 20% of available balance
-DEFAULT_LEVERAGE = int(os.getenv("LEVERAGE", "5"))
 BITGET_API_URL = "https://api.bitget.com"
+TRADE_AMOUNT_PERCENT = 0.2
+DEFAULT_LEVERAGE = int(os.getenv("LEVERAGE", "5"))
 
-# Discord client setup
+# Discord client
 intents = discord.Intents.default()
 intents.messages = True
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-# Signature generator
+symbol_precision_map = {}
+
+# Helper to generate Bitget signature
 def generate_signature(timestamp, method, request_path, body):
     pre_hash = f"{timestamp}{method.upper()}{request_path}{body}"
-    hmac_digest = hmac.new(
-        BITGET_SECRET_KEY.encode(),
-        pre_hash.encode(),
-        hashlib.sha256
-    ).digest()
+    hmac_digest = hmac.new(BITGET_SECRET_KEY.encode(), pre_hash.encode(), hashlib.sha256).digest()
     return base64.b64encode(hmac_digest).decode()
 
 # Auth headers
@@ -48,22 +46,41 @@ def get_headers(method, path, body=""):
         "Content-Type": "application/json"
     }
 
-# Get balance
-def get_balance():
+# Format quantity to precision
+def format_quantity(value, precision):
+    quantized = Decimal(str(value)).quantize(Decimal("1." + "0" * precision), rounding=ROUND_DOWN)
+    return format(quantized, f".{precision}f")
+
+# Get symbol precision map from Bitget v2 API
+def load_symbol_precisions():
+    global symbol_precision_map
     try:
-        path = "/api/v2/mix/account/accounts?productType=umcbl"
-        url = BITGET_API_URL + path
+        url = f"{BITGET_API_URL}/api/v2/mix/market/symbols"
+        response = requests.get(url)
+        data = response.json()
+        for item in data.get("data", []):
+            symbol = item.get("symbol")
+            size_place = int(item.get("sizePlace", 3))
+            symbol_precision_map[symbol] = size_place
+    except Exception as e:
+        print(f"❌ Failed to load symbol metadata: {e}")
+
+# Get available balance
+def get_available_balance():
+    try:
+        path = "/api/v2/mix/account/accounts"
+        url = BITGET_API_URL + path + "?productType=umcbl"
         headers = get_headers("GET", path)
         res = requests.get(url, headers=headers)
-        data = res.json()
-        for acc in data.get("data", []):
-            if acc.get("marginCoin") == "USDT":
-                return float(acc.get("available", 0))
+        balances = res.json().get("data", [])
+        for asset in balances:
+            if asset.get("marginCoin") == "USDT":
+                return float(asset.get("available", 0))
     except Exception as e:
-        print("Balance error:", e)
+        print(f"❌ Balance fetch error: {e}")
     return 0
 
-# Place futures market order
+# Place order on Bitget
 def place_futures_order(symbol, side, quantity, leverage):
     path = "/api/v2/mix/order/place-order"
     url = BITGET_API_URL + path
@@ -72,37 +89,33 @@ def place_futures_order(symbol, side, quantity, leverage):
         "marginCoin": "USDT",
         "side": side,
         "orderType": "market",
-        "size": str(quantity),
+        "size": quantity,
         "leverage": str(leverage),
         "productType": "umcbl",
         "marginMode": "isolated"
     }
     body_json = json.dumps(body_data)
     headers = get_headers("POST", path, body_json)
-    try:
-        print(f"📤 Order body: {body_json}")
-        response = requests.post(url, headers=headers, json=body_data)
-        return response.json()
-    except Exception as e:
-        print("❌ Order failed:", e)
-        return {"code": "ERROR", "msg": str(e)}
+    response = requests.post(url, headers=headers, json=body_data)
+    return response.json()
 
 @client.event
 async def on_ready():
     print(f"✅ Logged in as {client.user}")
+    load_symbol_precisions()
 
 @client.event
 async def on_message(message):
     if message.author.bot or message.channel.id != ALERT_CHANNEL_ID:
         return
 
-    content = message.content.upper().replace("–", "-")
+    content = message.content.upper()
     if "BUYZONE" in content and "TARGETS" in content and "STOP" in content:
         await message.channel.send("🟨 Signal received")
         try:
             parts = content.split()
             raw_symbol = parts[0].replace("PERP", "").replace("USDT", "")
-            symbol = f"{raw_symbol}USDT"
+            symbol = f"{raw_symbol}USDT_UMCBL"
 
             side = "buy"
             if "SHORT" in parts[0] or "(SHORT)" in content:
@@ -117,37 +130,34 @@ async def on_message(message):
                     pass
 
             i = parts.index("BUYZONE")
-            entry_low = float(parts[i + 1])
+            entry_low = float(parts[i + 1].replace("–", "-").replace("—", "-"))
             entry_high = float(parts[i + 3]) if parts[i + 2] == "-" else float(parts[i + 2])
-            entry = round((entry_low + entry_high) / 2, 6)
+            entry_price = (entry_low + entry_high) / 2
 
-            stop_index = parts.index("STOP")
-            stop = float(parts[stop_index + 1])
+            balance = get_available_balance()
+            trade_value = balance * TRADE_AMOUNT_PERCENT
+            raw_quantity = trade_value / entry_price
 
-            target_lines = parts[parts.index("TARGETS") + 1:stop_index]
-            targets = [float(t) for t in target_lines if t.replace('.', '', 1).isdigit()]
-            targets = targets[:5]
+            precision = symbol_precision_map.get(symbol)
+            if precision is None:
+                await message.channel.send(f"❌ Metadata fetch failed for {symbol}")
+                return
 
-            balance = get_balance()
-            qty = round((balance * TRADE_PERCENT) / entry, 3)
+            quantity = format_quantity(raw_quantity, precision)
 
             await message.channel.send(f"🔎 Symbol: {symbol}")
             await message.channel.send(f"📈 Direction: {'LONG' if side == 'buy' else 'SHORT'}")
             await message.channel.send(f"⚙️ Leverage: x{leverage}")
-            await message.channel.send(f"💰 Entry: {entry}")
-            await message.channel.send(f"📦 Qty: {qty}")
-            await message.channel.send(f"🎯 Targets: {targets}")
-            await message.channel.send(f"🛡️ Stop: {stop}")
+            await message.channel.send(f"💰 Entry: {entry_price}")
+            await message.channel.send(f"📦 Size: {quantity}")
 
-            result = place_futures_order(symbol, side, qty, leverage)
-
+            result = place_futures_order(symbol, side, quantity, leverage)
             if result.get("code") == "00000":
-                await message.channel.send(f"✅ Order placed: {symbol} x{leverage} [{side.upper()}]")
+                await message.channel.send(f"✅ Bitget Order Placed: {symbol} x{leverage}")
             else:
                 await message.channel.send(f"❌ Trade failed: {result}")
 
         except Exception as e:
             await message.channel.send(f"⚠️ Error: {str(e)}")
 
-# Start bot
 client.run(DISCORD_BOT_TOKEN)
