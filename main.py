@@ -1,3 +1,4 @@
+
 import os
 import time
 import hmac
@@ -49,7 +50,7 @@ def get_headers(method, path, body=""):
         "Content-Type": "application/json"
     }
 
-# Place futures order
+# Place main futures market order
 def place_futures_order(symbol, side, quantity, leverage):
     path = "/api/v2/mix/order/place-order"
     url = BITGET_API_URL + path
@@ -61,70 +62,49 @@ def place_futures_order(symbol, side, quantity, leverage):
         "size": str(quantity),
         "leverage": str(leverage),
         "productType": "umcbl",
-        "marginMode": "cross"
+        "marginMode": "isolated"
     }
     body_json = json.dumps(body_data)
     headers = get_headers("POST", path, body_json)
 
     for attempt in range(3):
         try:
-            print(f"📤 Placing Bitget order: {body_json}")
             response = requests.post(url, headers=headers, json=body_data)
             return response.json()
         except Exception as e:
-            print(f"⚠️ Bitget API call failed (attempt {attempt+1}): {e}")
             time.sleep(3)
-    return {"error": "All attempts to place order failed."}
+    return {"error": "All attempts to place main order failed."}
 
-# Place take-profits and stop-loss
-
-def place_tp_sl_orders(symbol, side, base_quantity, targets, stop):
+# Place take-profit or stop-loss
+def place_tp_sl_order(symbol, side, quantity, trigger_price, is_tp):
     path = "/api/v2/mix/order/place-plan-order"
     url = BITGET_API_URL + path
-    headers = get_headers("POST", path)
+    order_type = "take_profit" if is_tp else "stop_loss"
+    trigger_direction = "ge" if (side == "buy" and is_tp) or (side == "sell" and not is_tp) else "le"
 
-    tp_percents = [0.5, 0.2, 0.15, 0.1, 0.05]
-    for i, target in enumerate(targets[:5]):
-        tp_qty = round(base_quantity * tp_percents[i], 4)
-        if tp_qty <= 0:
-            continue
-        tp_data = {
-            "symbol": symbol,
-            "marginCoin": "USDT",
-            "triggerPrice": str(target),
-            "executePrice": str(target),
-            "size": str(tp_qty),
-            "side": "sell" if side == "buy" else "buy",
-            "orderType": "limit",
-            "triggerType": "market_price",
-            "planType": "profit_plan",
-            "productType": "umcbl"
-        }
-        try:
-            response = requests.post(url, headers=headers, json=tp_data)
-            print(f"✅ TP order sent: {response.text}")
-        except Exception as e:
-            print(f"❌ Failed to send TP order: {e}")
-
-    # Stop-loss
-    sl_data = {
+    body_data = {
         "symbol": symbol,
         "marginCoin": "USDT",
-        "triggerPrice": str(stop),
-        "executePrice": str(stop),
-        "size": str(base_quantity),
-        "side": "sell" if side == "buy" else "buy",
+        "side": side,
+        "size": str(quantity),
+        "triggerPrice": str(trigger_price),
+        "executePrice": str(trigger_price),
+        "triggerType": "mark_price",
         "orderType": "market",
-        "triggerType": "market_price",
-        "planType": "loss_plan",
-        "productType": "umcbl"
+        "planType": order_type,
+        "triggerDirection": trigger_direction,
+        "productType": "umcbl",
+        "marginMode": "isolated"
     }
-    try:
-        response = requests.post(url, headers=headers, json=sl_data)
-        print(f"✅ SL order sent: {response.text}")
-    except Exception as e:
-        print(f"❌ Failed to send SL order: {e}")
 
+    body_json = json.dumps(body_data)
+    headers = get_headers("POST", path, body_json)
+
+    try:
+        res = requests.post(url, headers=headers, json=body_data)
+        return res.json()
+    except Exception as e:
+        return {"error": str(e)}
 
 # Discord bot events
 @client.event
@@ -160,40 +140,38 @@ async def on_message(message):
 
             # Buyzone parsing
             i = parts.index("BUYZONE")
-            entry_low = float(parts[i + 1].replace("–", "-").replace("—", "-"))
+            entry_low = float(parts[i + 1])
             entry_high = float(parts[i + 3]) if parts[i + 2] == "-" else float(parts[i + 2])
             entry_price = (entry_low + entry_high) / 2
             quantity = round(TRADE_AMOUNT / entry_price, 3)
 
-            # Parse targets
-            targets = []
-            if "TARGETS" in parts:
-                i = parts.index("TARGETS")
-                for val in parts[i + 1:]:
-                    try:
-                        if val == "STOP":
-                            break
-                        targets.append(float(val))
-                    except:
-                        continue
-
-            # Parse stop
-            stop = 0
-            if "STOP" in parts:
-                i = parts.index("STOP")
-                stop = float(parts[i + 1])
+            # Target prices
+            t_index = parts.index("TARGETS")
+            stop_index = parts.index("STOP")
+            targets = [float(p) for p in parts[t_index + 1:stop_index]]
+            stop_price = float(parts[stop_index + 1])
 
             await message.channel.send(f"🔎 Symbol: {symbol}")
             await message.channel.send(f"📈 Direction: {'LONG' if side == 'buy' else 'SHORT'}")
             await message.channel.send(f"⚙️ Leverage: x{leverage}")
-            await message.channel.send(f"💰 Entry price: {entry_price}")
-            await message.channel.send(f"📦 Order size: {quantity}")
+            await message.channel.send(f"💰 Entry: {entry_price}")
+            await message.channel.send(f"📦 Qty: {quantity}")
 
             result = place_futures_order(symbol, side, quantity, leverage)
-
             if result.get("code") == "00000":
-                await message.channel.send(f"✅ Bitget Order Placed: {symbol} x{leverage} [{side.upper()}]")
-                place_tp_sl_orders(symbol, side, quantity, targets, stop)
+                await message.channel.send(f"✅ Order Placed: {symbol} x{leverage} [{side.upper()}]")
+
+                # Place TP orders: 50%, 20%, 15%, 10%, 5%
+                tp_percents = [0.5, 0.2, 0.15, 0.1, 0.05]
+                for pct, tp in zip(tp_percents, targets[:5]):
+                    qty = round(quantity * pct, 3)
+                    tp_res = place_tp_sl_order(symbol, "sell" if side == "buy" else "buy", qty, tp, is_tp=True)
+                    await message.channel.send(f"📈 TP @{tp}: {tp_res.get('msg', tp_res)}")
+
+                # Stop-loss
+                sl_res = place_tp_sl_order(symbol, "sell" if side == "buy" else "buy", quantity, stop_price, is_tp=False)
+                await message.channel.send(f"🛑 SL @{stop_price}: {sl_res.get('msg', sl_res)}")
+
             else:
                 await message.channel.send(f"❌ Trade Failed: {result}")
 
