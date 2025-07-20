@@ -61,7 +61,7 @@ def place_futures_order(symbol, side, quantity, leverage):
         "size": str(quantity),
         "leverage": str(leverage),
         "productType": "umcbl",
-        "marginMode": "isolated"
+        "marginMode": "cross"
     }
     body_json = json.dumps(body_data)
     headers = get_headers("POST", path, body_json)
@@ -75,6 +75,56 @@ def place_futures_order(symbol, side, quantity, leverage):
             print(f"⚠️ Bitget API call failed (attempt {attempt+1}): {e}")
             time.sleep(3)
     return {"error": "All attempts to place order failed."}
+
+# Place take-profits and stop-loss
+
+def place_tp_sl_orders(symbol, side, base_quantity, targets, stop):
+    path = "/api/v2/mix/order/place-plan-order"
+    url = BITGET_API_URL + path
+    headers = get_headers("POST", path)
+
+    tp_percents = [0.5, 0.2, 0.15, 0.1, 0.05]
+    for i, target in enumerate(targets[:5]):
+        tp_qty = round(base_quantity * tp_percents[i], 4)
+        if tp_qty <= 0:
+            continue
+        tp_data = {
+            "symbol": symbol,
+            "marginCoin": "USDT",
+            "triggerPrice": str(target),
+            "executePrice": str(target),
+            "size": str(tp_qty),
+            "side": "sell" if side == "buy" else "buy",
+            "orderType": "limit",
+            "triggerType": "market_price",
+            "planType": "profit_plan",
+            "productType": "umcbl"
+        }
+        try:
+            response = requests.post(url, headers=headers, json=tp_data)
+            print(f"✅ TP order sent: {response.text}")
+        except Exception as e:
+            print(f"❌ Failed to send TP order: {e}")
+
+    # Stop-loss
+    sl_data = {
+        "symbol": symbol,
+        "marginCoin": "USDT",
+        "triggerPrice": str(stop),
+        "executePrice": str(stop),
+        "size": str(base_quantity),
+        "side": "sell" if side == "buy" else "buy",
+        "orderType": "market",
+        "triggerType": "market_price",
+        "planType": "loss_plan",
+        "productType": "umcbl"
+    }
+    try:
+        response = requests.post(url, headers=headers, json=sl_data)
+        print(f"✅ SL order sent: {response.text}")
+    except Exception as e:
+        print(f"❌ Failed to send SL order: {e}")
+
 
 # Discord bot events
 @client.event
@@ -115,6 +165,24 @@ async def on_message(message):
             entry_price = (entry_low + entry_high) / 2
             quantity = round(TRADE_AMOUNT / entry_price, 3)
 
+            # Parse targets
+            targets = []
+            if "TARGETS" in parts:
+                i = parts.index("TARGETS")
+                for val in parts[i + 1:]:
+                    try:
+                        if val == "STOP":
+                            break
+                        targets.append(float(val))
+                    except:
+                        continue
+
+            # Parse stop
+            stop = 0
+            if "STOP" in parts:
+                i = parts.index("STOP")
+                stop = float(parts[i + 1])
+
             await message.channel.send(f"🔎 Symbol: {symbol}")
             await message.channel.send(f"📈 Direction: {'LONG' if side == 'buy' else 'SHORT'}")
             await message.channel.send(f"⚙️ Leverage: x{leverage}")
@@ -125,6 +193,7 @@ async def on_message(message):
 
             if result.get("code") == "00000":
                 await message.channel.send(f"✅ Bitget Order Placed: {symbol} x{leverage} [{side.upper()}]")
+                place_tp_sl_orders(symbol, side, quantity, targets, stop)
             else:
                 await message.channel.send(f"❌ Trade Failed: {result}")
 
