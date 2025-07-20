@@ -17,15 +17,18 @@ BITGET_SECRET_KEY = os.getenv("BITGET_SECRET_KEY")
 BITGET_PASSPHRASE = os.getenv("BITGET_PASSPHRASE")
 
 DEFAULT_LEVERAGE = int(os.getenv("LEVERAGE", "5"))
+TRADE_RISK_PERCENT = 0.2  # 20%
+
 BITGET_API_URL = "https://api.bitget.com"
 
-# Discord client setup
+# Discord setup
 intents = discord.Intents.default()
 intents.messages = True
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-# Generate signature for Bitget API
+# ===== Signature & Auth =====
+
 def generate_signature(timestamp, method, request_path, body):
     pre_hash = f"{timestamp}{method.upper()}{request_path}{body}"
     hmac_digest = hmac.new(
@@ -35,7 +38,6 @@ def generate_signature(timestamp, method, request_path, body):
     ).digest()
     return base64.b64encode(hmac_digest).decode()
 
-# Build headers for Bitget API
 def get_headers(method, path, body=""):
     timestamp = str(int(time.time() * 1000))
     sign = generate_signature(timestamp, method, path, body)
@@ -47,36 +49,52 @@ def get_headers(method, path, body=""):
         "Content-Type": "application/json"
     }
 
-# Get USDT balance
+# ===== Bitget Helpers =====
+
 def get_usdt_balance():
     path = "/api/v2/mix/account/account"
-    url = BITGET_API_URL + path + "?productType=umcbl"
+    url = BITGET_API_URL + path
+    params = {"productType": "umcbl"}
+    body = ""
     headers = get_headers("GET", path)
-    res = requests.get(url, headers=headers)
-    data = res.json()
-    for item in data.get("data", {}).get("accountList", []):
-        if item.get("marginCoin") == "USDT":
-            return float(item.get("available", 0))
-    return 0
+    try:
+        res = requests.get(url, headers=headers, params=params)
+        data = res.json()
+        for asset in data.get("data", []):
+            if asset.get("marginCoin") == "USDT":
+                return float(asset.get("available"), 0.0)
+    except Exception as e:
+        print(f"⚠️ Error fetching balance: {e}")
+    return 0.0
 
-# Get trading rules for a symbol
 symbol_meta_cache = {}
 def get_symbol_meta(symbol):
     global symbol_meta_cache
     if symbol in symbol_meta_cache:
         return symbol_meta_cache[symbol]
 
-    path = "/api/v2/mix/market/symbols"
-    url = BITGET_API_URL + path + "?productType=umcbl"
-    res = requests.get(url)
-    data = res.json()
-    for item in data.get("data", []):
-        if item.get("symbol") == symbol:
-            symbol_meta_cache[symbol] = item
-            return item
-    return None
+    try:
+        path = "/api/v2/mix/market/symbols"
+        url = BITGET_API_URL + path + "?productType=umcbl"
+        res = requests.get(url)
+        res.raise_for_status()
+        data = res.json()
 
-# Place futures order
+        for item in data.get("data", []):
+            if item.get("symbol", "").upper() == symbol.upper():
+                symbol_meta_cache[symbol] = item
+                return item
+
+        print(f"⚠️ Symbol {symbol} not found in Bitget metadata.")
+        return None
+    except Exception as e:
+        print(f"❌ Error fetching symbol metadata: {e}")
+        return None
+
+def round_size(size, precision):
+    factor = 10 ** precision
+    return int(size * factor) / factor
+
 def place_futures_order(symbol, side, quantity, leverage):
     path = "/api/v2/mix/order/place-order"
     url = BITGET_API_URL + path
@@ -103,7 +121,8 @@ def place_futures_order(symbol, side, quantity, leverage):
             time.sleep(3)
     return {"error": "All attempts to place order failed."}
 
-# Discord bot events
+# ===== Discord Bot Events =====
+
 @client.event
 async def on_ready():
     print(f"✅ Logged in as {client.user}")
@@ -113,7 +132,7 @@ async def on_message(message):
     if message.author.bot or message.channel.id != ALERT_CHANNEL_ID:
         return
 
-    content = message.content.upper().replace("–", "-").replace("—", "-")
+    content = message.content.upper()
     if "BUYZONE" in content and "TARGETS" in content and "STOP" in content:
         await message.channel.send("🟨 Signal received")
         try:
@@ -127,21 +146,20 @@ async def on_message(message):
 
             leverage = DEFAULT_LEVERAGE
             if "LEVERAGE" in parts:
-                i = parts.index("LEVERAGE")
                 try:
+                    i = parts.index("LEVERAGE")
                     leverage = int(parts[i + 1].replace("X", ""))
                 except:
                     pass
 
             i = parts.index("BUYZONE")
-            entry_low = float(parts[i + 1])
+            entry_low = float(parts[i + 1].replace("–", "-").replace("—", "-"))
             entry_high = float(parts[i + 3]) if parts[i + 2] == "-" else float(parts[i + 2])
             entry_price = (entry_low + entry_high) / 2
 
-            balance = get_usdt_balance()
-            notional = balance * 0.2
-            raw_qty = notional / entry_price
-
+            # Get balance & symbol metadata
+            usdt_balance = get_usdt_balance()
+            trade_amount = usdt_balance * TRADE_RISK_PERCENT
             meta = get_symbol_meta(symbol)
             if not meta:
                 await message.channel.send(f"❌ Error: Symbol metadata not found for {symbol}")
@@ -149,7 +167,12 @@ async def on_message(message):
 
             min_size = float(meta.get("minTradeNum", 0.001))
             size_precision = int(meta.get("priceScale", 3))
-            quantity = max(round(raw_qty, size_precision), min_size)
+
+            raw_qty = trade_amount / entry_price
+            quantity = round_size(raw_qty, size_precision)
+            if quantity < min_size:
+                await message.channel.send(f"❌ Error: Quantity {quantity} below min size {min_size} for {symbol}")
+                return
 
             await message.channel.send(f"🔎 Symbol: {symbol}")
             await message.channel.send(f"📈 Direction: {'LONG' if side == 'buy' else 'SHORT'}")
@@ -158,7 +181,6 @@ async def on_message(message):
             await message.channel.send(f"📦 Order size: {quantity}")
 
             result = place_futures_order(symbol, side, quantity, leverage)
-
             if result.get("code") == "00000":
                 await message.channel.send(f"✅ Bitget Order Placed: {symbol} x{leverage} [{side.upper()}]")
             else:
@@ -167,5 +189,5 @@ async def on_message(message):
         except Exception as e:
             await message.channel.send(f"⚠️ Error: {str(e)}")
 
-# Start bot
+# ===== Start Bot =====
 client.run(DISCORD_BOT_TOKEN)
