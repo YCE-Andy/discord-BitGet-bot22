@@ -8,7 +8,6 @@ import requests
 import discord
 import asyncio
 
-# ENV variables
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 ALERT_CHANNEL_ID = int(os.getenv("ALERT_CHANNEL_ID"))
 
@@ -20,20 +19,14 @@ TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", "200"))
 DEFAULT_LEVERAGE = int(os.getenv("LEVERAGE", "5"))
 BITGET_API_URL = "https://api.bitget.com"
 
-# Discord client setup
 intents = discord.Intents.default()
 intents.messages = True
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-# Signature generator
 def generate_signature(timestamp, method, request_path, body):
     pre_hash = f"{timestamp}{method.upper()}{request_path}{body}"
-    hmac_digest = hmac.new(
-        BITGET_SECRET_KEY.encode(),
-        pre_hash.encode(),
-        hashlib.sha256
-    ).digest()
+    hmac_digest = hmac.new(BITGET_SECRET_KEY.encode(), pre_hash.encode(), hashlib.sha256).digest()
     return base64.b64encode(hmac_digest).decode()
 
 def get_headers(method, path, body=""):
@@ -58,35 +51,56 @@ def place_futures_order(symbol, side, quantity, leverage):
         "size": str(quantity),
         "leverage": str(leverage),
         "productType": "umcbl",
-        "marginMode": "isolated",
-        "tradeSide": "open"
+        "marginMode": "isolated"
     }
     body_json = json.dumps(body_data)
     headers = get_headers("POST", path, body_json)
     response = requests.post(url, headers=headers, json=body_data)
     return response.json()
 
-def place_tp_sl(symbol, side, price, size, plan_type):
+def place_tp_sl(symbol, entry_price, targets, stop_loss, side):
     path = "/api/v2/mix/order/place-plan-order"
     url = BITGET_API_URL + path
-    body_data = {
+
+    tp_sizes = [0.5, 0.2, 0.15, 0.1, 0.05]
+    tp_results = []
+
+    for i, tp in enumerate(targets[:5]):
+        tp_body = {
+            "symbol": symbol,
+            "marginCoin": "USDT",
+            "size": str(round(TRADE_AMOUNT / entry_price * tp_sizes[i], 3)),
+            "side": side,
+            "orderType": "market",
+            "triggerPrice": str(tp),
+            "triggerType": "market_price",
+            "executePrice": str(tp),
+            "planType": "profit_plan",
+            "marginMode": "isolated",
+            "productType": "umcbl"
+        }
+        body_json = json.dumps(tp_body)
+        headers = get_headers("POST", path, body_json)
+        res = requests.post(url, headers=headers, json=tp_body)
+        tp_results.append((tp, res.json()))
+
+    sl_body = {
         "symbol": symbol,
         "marginCoin": "USDT",
-        "size": str(size),
-        "triggerPrice": str(price),
-        "executePrice": str(price),
-        "triggerType": "market_price",
+        "size": str(round(TRADE_AMOUNT / entry_price, 3)),
+        "side": "sell" if side == "buy" else "buy",
         "orderType": "market",
-        "planType": plan_type,
-        "side": side,
-        "productType": "umcbl",
+        "triggerPrice": str(stop_loss),
+        "triggerType": "market_price",
+        "executePrice": str(stop_loss),
+        "planType": "loss_plan",
         "marginMode": "isolated",
-        "tradeSide": "close"
+        "productType": "umcbl"
     }
-    body_json = json.dumps(body_data)
-    headers = get_headers("POST", path, body_json)
-    response = requests.post(url, headers=headers, json=body_data)
-    return response.json()
+    sl_json = json.dumps(sl_body)
+    headers = get_headers("POST", path, sl_json)
+    sl_result = requests.post(url, headers=headers, json=sl_body).json()
+    return tp_results, sl_result
 
 @client.event
 async def on_ready():
@@ -104,7 +118,6 @@ async def on_message(message):
             parts = content.split()
             raw_symbol = parts[0].replace("PERP", "").replace("USDT", "")
             symbol = f"{raw_symbol}USDT"
-
             side = "buy"
             if "SHORT" in parts[0] or "(SHORT)" in content:
                 side = "sell"
@@ -118,10 +131,18 @@ async def on_message(message):
                     pass
 
             i = parts.index("BUYZONE")
-            entry_low = float(parts[i + 1].replace("–", "-"))
-            entry_high = float(parts[i + 3] if parts[i + 2] == "-" else parts[i + 2])
+            entry_low = float(parts[i + 1])
+            entry_high = float(parts[i + 3]) if parts[i + 2] == "-" else float(parts[i + 2])
             entry_price = (entry_low + entry_high) / 2
             quantity = round(TRADE_AMOUNT / entry_price, 3)
+
+            stop = float(parts[parts.index("STOP") + 1])
+
+            targets = []
+            i = parts.index("TARGETS") + 1
+            while i < len(parts) and parts[i].replace('.', '', 1).isdigit():
+                targets.append(float(parts[i]))
+                i += 1
 
             await message.channel.send(f"🔎 Symbol: {symbol}")
             await message.channel.send(f"📈 Direction: {'LONG' if side == 'buy' else 'SHORT'}")
@@ -133,26 +154,10 @@ async def on_message(message):
 
             if result.get("code") == "00000":
                 await message.channel.send(f"✅ Bitget Order Placed: {symbol} x{leverage} [{side.upper()}]")
-
-                targets_index = parts.index("TARGETS")
-                targets = []
-                for j in range(1, 10):
-                    try:
-                        price = float(parts[targets_index + j])
-                        targets.append(price)
-                    except:
-                        break
-                stop_price = float(parts[parts.index("STOP") + 1])
-
-                split_sizes = [0.5, 0.2, 0.15, 0.1, 0.05]
-                for i, target_price in enumerate(targets[:5]):
-                    split_qty = round(quantity * split_sizes[i], 3)
-                    tp_result = place_tp_sl(symbol, "sell" if side == "buy" else "buy", target_price, split_qty, "profit_plan")
-                    await message.channel.send(f"📈 TP @{target_price}: {tp_result}")
-
-                sl_result = place_tp_sl(symbol, "sell" if side == "buy" else "buy", stop_price, quantity, "loss_plan")
-                await message.channel.send(f"🛑 SL @{stop_price}: {sl_result}")
-
+                tp_results, sl_result = place_tp_sl(symbol, entry_price, targets, stop, side)
+                for tp, r in tp_results:
+                    await message.channel.send(f"📈 TP @{tp}: {'✅' if r.get('code') == '00000' else '❌ ' + str(r)}")
+                await message.channel.send(f"🛑 SL @{stop}: {'✅' if sl_result.get('code') == '00000' else '❌ ' + str(sl_result)}")
             else:
                 await message.channel.send(f"❌ Trade Failed: {result}")
 
