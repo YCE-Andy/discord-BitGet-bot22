@@ -17,8 +17,7 @@ BITGET_SECRET_KEY = os.getenv("BITGET_SECRET_KEY")
 BITGET_PASSPHRASE = os.getenv("BITGET_PASSPHRASE")
 
 TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", "200"))
-DEFAULT_LEVERAGE = int(os.getenv("LEVERAGE", "5"))
-
+DEFAULT_LEVERAGE = int(os.getenv("LEVERAGE", "5")
 BITGET_API_URL = "https://api.bitget.com"
 
 intents = discord.Intents.default()
