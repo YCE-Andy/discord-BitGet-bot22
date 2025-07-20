@@ -16,9 +16,7 @@ BITGET_API_KEY = os.getenv("BITGET_API_KEY")
 BITGET_SECRET_KEY = os.getenv("BITGET_SECRET_KEY")
 BITGET_PASSPHRASE = os.getenv("BITGET_PASSPHRASE")
 
-TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", "200"))
 DEFAULT_LEVERAGE = int(os.getenv("LEVERAGE", "5"))
-
 BITGET_API_URL = "https://api.bitget.com"
 
 # Discord client setup
@@ -49,6 +47,21 @@ def get_headers(method, path, body=""):
         "Content-Type": "application/json"
     }
 
+def get_available_balance():
+    path = "/api/mix/v1/account/account"
+    url = f"{BITGET_API_URL}{path}?productType=umcbl"
+    headers = get_headers("GET", path)
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+        for acc in data.get("data", []):
+            if acc["marginCoin"] == "USDT":
+                return float(acc["available"])
+    except Exception as e:
+        print(f"⚠️ Error fetching balance: {e}")
+    return 0.0
+
 # Place futures order
 def place_futures_order(symbol, side, quantity, leverage):
     path = "/api/v2/mix/order/place-order"
@@ -76,6 +89,43 @@ def place_futures_order(symbol, side, quantity, leverage):
             time.sleep(3)
     return {"error": "All attempts to place order failed."}
 
+def place_tp_order(symbol, qty, price):
+    path = "/api/v2/mix/order/place-order"
+    url = BITGET_API_URL + path
+    body_data = {
+        "symbol": symbol,
+        "marginCoin": "USDT",
+        "side": "sell",
+        "orderType": "limit",
+        "price": str(price),
+        "size": str(qty),
+        "marginMode": "isolated",
+        "timeInForceValue": "normal",
+        "productType": "umcbl"
+    }
+    body_json = json.dumps(body_data)
+    headers = get_headers("POST", path, body_json)
+    return requests.post(url, headers=headers, json=body_data).json()
+
+def place_stop_loss(symbol, qty, stop_price):
+    path = "/api/v2/mix/plan/place-plan"
+    url = BITGET_API_URL + path
+    body_data = {
+        "symbol": symbol,
+        "marginCoin": "USDT",
+        "side": "sell",
+        "orderType": "market",
+        "triggerPrice": str(stop_price),
+        "triggerType": "fill_price",
+        "size": str(qty),
+        "marginMode": "isolated",
+        "executePrice": "",
+        "productType": "umcbl"
+    }
+    body_json = json.dumps(body_data)
+    headers = get_headers("POST", path, body_json)
+    return requests.post(url, headers=headers, json=body_data).json()
+
 # Discord bot events
 @client.event
 async def on_ready():
@@ -94,12 +144,10 @@ async def on_message(message):
             raw_symbol = parts[0].replace("PERP", "").replace("USDT", "")
             symbol = f"{raw_symbol}USDT"
 
-            # Detect long or short
             side = "buy"
             if "SHORT" in parts[0] or "(SHORT)" in content:
                 side = "sell"
 
-            # Leverage parsing
             leverage = DEFAULT_LEVERAGE
             if "LEVERAGE" in parts:
                 i = parts.index("LEVERAGE")
@@ -108,12 +156,19 @@ async def on_message(message):
                 except:
                     pass
 
-            # Buyzone parsing
             i = parts.index("BUYZONE")
             entry_low = float(parts[i + 1])
             entry_high = float(parts[i + 3]) if parts[i + 2] == "-" else float(parts[i + 2])
             entry_price = (entry_low + entry_high) / 2
-            quantity = round(TRADE_AMOUNT / entry_price, 3)
+
+            balance = get_available_balance()
+            notional = balance * 0.2
+            quantity = round(notional / entry_price, 3)
+
+            stop = float(parts[parts.index("STOP") + 1])
+            target_start = parts.index("TARGETS") + 1
+            target_end = parts.index("STOP")
+            targets = [float(x) for x in parts[target_start:target_end] if x.replace('.', '', 1).isdigit()]
 
             await message.channel.send(f"🔎 Symbol: {symbol}")
             await message.channel.send(f"📈 Direction: {'LONG' if side == 'buy' else 'SHORT'}")
@@ -125,6 +180,19 @@ async def on_message(message):
 
             if result.get("code") == "00000":
                 await message.channel.send(f"✅ Bitget Order Placed: {symbol} x{leverage} [{side.upper()}]")
+
+                # Place TPs
+                tp_ratios = [0.5, 0.2, 0.15, 0.1, 0.05]
+                for i in range(min(5, len(targets))):
+                    tp_qty = round(quantity * tp_ratios[i], 3)
+                    tp_price = targets[i]
+                    tp_result = place_tp_order(symbol, tp_qty, tp_price)
+                    await message.channel.send(f"🎯 TP{i+1} @ {tp_price}: {tp_result.get('msg', tp_result)}")
+
+                # Place SL
+                sl_result = place_stop_loss(symbol, quantity, stop)
+                await message.channel.send(f"🛡 Stop @ {stop}: {sl_result.get('msg', sl_result)}")
+
             else:
                 await message.channel.send(f"❌ Trade Failed: {result}")
 
