@@ -8,29 +8,28 @@ import requests
 import discord
 import asyncio
 
-# ENV Variables
+# Load environment variables
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 ALERT_CHANNEL_ID = int(os.getenv("ALERT_CHANNEL_ID"))
+
 BITGET_API_KEY = os.getenv("BITGET_API_KEY")
 BITGET_SECRET_KEY = os.getenv("BITGET_SECRET_KEY")
 BITGET_PASSPHRASE = os.getenv("BITGET_PASSPHRASE")
+
 TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", "200"))
 DEFAULT_LEVERAGE = int(os.getenv("LEVERAGE", "5"))
+
 BITGET_API_URL = "https://api.bitget.com"
 
-# Discord Client
 intents = discord.Intents.default()
 intents.messages = True
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-# Auth Signature
 def generate_signature(timestamp, method, request_path, body):
     pre_hash = f"{timestamp}{method.upper()}{request_path}{body}"
     hmac_digest = hmac.new(
-        BITGET_SECRET_KEY.encode(),
-        pre_hash.encode(),
-        hashlib.sha256
+        BITGET_SECRET_KEY.encode(), pre_hash.encode(), hashlib.sha256
     ).digest()
     return base64.b64encode(hmac_digest).decode()
 
@@ -42,10 +41,9 @@ def get_headers(method, path, body=""):
         "ACCESS-SIGN": sign,
         "ACCESS-TIMESTAMP": timestamp,
         "ACCESS-PASSPHRASE": BITGET_PASSPHRASE,
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
     }
 
-# Place Main Market Order
 def place_futures_order(symbol, side, quantity, leverage):
     path = "/api/v2/mix/order/place-order"
     url = BITGET_API_URL + path
@@ -57,8 +55,7 @@ def place_futures_order(symbol, side, quantity, leverage):
         "size": str(quantity),
         "leverage": str(leverage),
         "productType": "umcbl",
-        "marginMode": "isolated",
-        "positionMode": "one_way"
+        "marginMode": "isolated"
     }
     body_json = json.dumps(body_data)
     headers = get_headers("POST", path, body_json)
@@ -68,25 +65,25 @@ def place_futures_order(symbol, side, quantity, leverage):
         response = requests.post(url, headers=headers, json=body_data)
         return response.json()
     except Exception as e:
-        print(f"❌ Bitget order error: {e}")
-        return {"code": "error", "msg": str(e)}
+        print(f"⚠️ Bitget API call failed: {e}")
+        return {"error": str(e)}
 
-# TP/SL Logic
-def place_tp_sl_order(symbol, trigger_price, plan_type, side, size):
+def place_tp_or_sl(symbol, price, side, size, is_tp):
     path = "/api/v2/mix/order/place-plan-order"
     url = BITGET_API_URL + path
+
+    plan_type = "profit_plan" if is_tp else "loss_plan"
     body_data = {
         "symbol": symbol,
         "marginCoin": "USDT",
         "size": str(size),
-        "side": side,
+        "executePrice": str(price),
+        "triggerPrice": str(price),
+        "triggerType": "market_price",
         "planType": plan_type,
-        "triggerPrice": str(trigger_price),
-        "executePrice": str(trigger_price),
-        "orderType": "limit",
+        "side": side,
         "marginMode": "isolated",
-        "productType": "umcbl",
-        "positionMode": "one_way"
+        "productType": "umcbl"
     }
     body_json = json.dumps(body_data)
     headers = get_headers("POST", path, body_json)
@@ -95,9 +92,8 @@ def place_tp_sl_order(symbol, trigger_price, plan_type, side, size):
         response = requests.post(url, headers=headers, json=body_data)
         return response.json()
     except Exception as e:
-        return {"code": "error", "msg": str(e)}
+        return {"error": str(e)}
 
-# Discord Events
 @client.event
 async def on_ready():
     print(f"✅ Logged in as {client.user}")
@@ -115,12 +111,10 @@ async def on_message(message):
             raw_symbol = parts[0].replace("PERP", "").replace("USDT", "")
             symbol = f"{raw_symbol}USDT"
 
-            # Direction
             side = "buy"
             if "SHORT" in parts[0] or "(SHORT)" in content:
                 side = "sell"
 
-            # Leverage
             leverage = DEFAULT_LEVERAGE
             if "LEVERAGE" in parts:
                 i = parts.index("LEVERAGE")
@@ -129,20 +123,18 @@ async def on_message(message):
                 except:
                     pass
 
-            # BUYZONE
             i = parts.index("BUYZONE")
-            entry_low = float(parts[i + 1].replace("–", "-"))
-            entry_high = float(parts[i + 3] if parts[i + 2] == "-" else parts[i + 2].replace("–", "-"))
+            entry_low = float(parts[i + 1].replace("–", "-").replace(",", ""))
+            entry_high = float(parts[i + 3]) if parts[i + 2] == "-" else float(parts[i + 2])
             entry_price = (entry_low + entry_high) / 2
             quantity = round(TRADE_AMOUNT / entry_price, 3)
 
-            await message.channel.send(f"📈 Symbol: {symbol}")
-            await message.channel.send(f"📉 Direction: {'LONG' if side == 'buy' else 'SHORT'}")
+            await message.channel.send(f"🔎 Symbol: {symbol}")
+            await message.channel.send(f"📈 Direction: {'LONG' if side == 'buy' else 'SHORT'}")
             await message.channel.send(f"⚙️ Leverage: x{leverage}")
-            await message.channel.send(f"💰 Entry: {entry_price}")
-            await message.channel.send(f"📦 Qty: {quantity}")
+            await message.channel.send(f"💰 Entry price: {entry_price}")
+            await message.channel.send(f"📦 Order size: {quantity}")
 
-            # Place main order
             result = place_futures_order(symbol, side, quantity, leverage)
             if result.get("code") == "00000":
                 await message.channel.send(f"✅ Bitget Order Placed: {symbol} x{leverage} [{side.upper()}]")
@@ -150,41 +142,27 @@ async def on_message(message):
                 await message.channel.send(f"❌ Trade Failed: {result}")
                 return
 
-            # TARGETS
-            i = parts.index("TARGETS")
+            # TP and SL logic
             targets = []
-            for x in parts[i+1:]:
-                try:
-                    if x == "STOP":
-                        break
-                    targets.append(float(x))
-                except:
-                    continue
+            if "TARGETS" in parts:
+                i = parts.index("TARGETS") + 1
+                while i < len(parts) and parts[i].replace(".", "", 1).isdigit():
+                    targets.append(float(parts[i]))
+                    i += 1
+            stop_price = float(parts[parts.index("STOP") + 1])
 
-            stop = None
-            if "STOP" in parts:
-                stop_index = parts.index("STOP")
-                try:
-                    stop = float(parts[stop_index + 1])
-                except:
-                    pass
-
-            # TP Split
-            tp_splits = [0.5, 0.2, 0.15, 0.1, 0.05]
+            split = [0.5, 0.2, 0.15, 0.1, 0.05]
             for i in range(min(5, len(targets))):
-                tp_qty = round(quantity * tp_splits[i], 3)
-                tp_result = place_tp_sl_order(symbol, targets[i], "profit_plan", "sell" if side == "buy" else "buy", tp_qty)
-                status = "✅" if tp_result.get("code") == "00000" else f"❌ {tp_result.get('msg')}"
+                tp_size = round(quantity * split[i], 3)
+                tp_res = place_tp_or_sl(symbol, targets[i], side, tp_size, True)
+                status = "✅" if tp_res.get("code") == "00000" else f"❌ {tp_res.get('msg')}"
                 await message.channel.send(f"📈 TP @{targets[i]}: {status}")
 
-            if stop:
-                sl_qty = quantity
-                sl_result = place_tp_sl_order(symbol, stop, "loss_plan", "sell" if side == "buy" else "buy", sl_qty)
-                sl_status = "✅" if sl_result.get("code") == "00000" else f"❌ {sl_result.get('msg')}"
-                await message.channel.send(f"🛑 SL @{stop}: {sl_status}")
+            sl_res = place_tp_or_sl(symbol, stop_price, side, quantity, False)
+            status = "✅" if sl_res.get("code") == "00000" else f"❌ {sl_res.get('msg')}"
+            await message.channel.send(f"🛑 SL @{stop_price}: {status}")
 
         except Exception as e:
             await message.channel.send(f"⚠️ Error: {str(e)}")
 
-# Run bot
 client.run(DISCORD_BOT_TOKEN)
