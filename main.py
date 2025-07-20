@@ -110,7 +110,7 @@ async def on_message(message):
 
             # Buyzone parsing
             i = parts.index("BUYZONE")
-            entry_low = float(parts[i + 1])
+            entry_low = float(parts[i + 1].replace("–", "-").replace("—", "-"))
             entry_high = float(parts[i + 3]) if parts[i + 2] == "-" else float(parts[i + 2])
             entry_price = (entry_low + entry_high) / 2
             quantity = round(TRADE_AMOUNT / entry_price, 3)
