@@ -8,7 +8,7 @@ import hashlib
 import requests
 import json
 
-# Load environment variables
+# Load env vars
 load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID"))
@@ -16,29 +16,25 @@ DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID"))
 BLOFIN_API_KEY = os.getenv("BLOFIN_API_KEY")
 BLOFIN_API_SECRET = os.getenv("BLOFIN_API_SECRET")
 TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT"))  # e.g. 500
-LEVERAGE = int(os.getenv("LEVERAGE"))  # Default leverage fallback if not parsed
+LEVERAGE = int(os.getenv("LEVERAGE"))  # default leverage if not in message
 
-# Set Discord intents
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-# Signature for Blofin API
 def sign_blofin_request(api_secret, timestamp, method, path, body=''):
     payload = f"{timestamp}{method.upper()}{path}{body}"
     return hmac.new(api_secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
-# Get latest market price
 def get_market_price(symbol):
     url = f"https://api.blofin.com/api/v1/market/ticker?symbol={symbol}"
+    r = requests.get(url)
+    data = r.json()
     try:
-        r = requests.get(url)
-        data = r.json()
         return float(data["data"]["lastPrice"])
     except:
         return None
 
-# Place a market order
 def place_order(symbol, side, size, leverage, tp_list, sl_price):
     url = "/api/v1/trade/order"
     full_url = f"https://api.blofin.com{url}"
@@ -74,25 +70,27 @@ def place_order(symbol, side, size, leverage, tp_list, sl_price):
     print(f"Trade response: {r.status_code} - {r.text}")
     return r.json()
 
-# Bot is ready
 @client.event
 async def on_ready():
     print(f"✅ Logged in as {client.user}")
 
-# Message received
 @client.event
 async def on_message(message):
     if message.channel.id != DISCORD_CHANNEL_ID or message.author == client.user:
         return
 
-    print(f"📩 Message received: {message.content}")
-
     content = message.content
     symbol_match = re.search(r"([A-Z]+USDT)", content)
     buyzone_match = re.search(r"BUYZONE\s+([\d.]+)\s*-\s*([\d.]+)", content)
-    targets = re.findall(r"\b0\.\d{3,}\b", content)
     stop_match = re.search(r"Stop\s+([\d.]+)", content)
     lev_match = re.search(r"Leverage\s*x?(\d+)", content)
+
+    # Get TP targets from TARGETS section only
+    try:
+        target_section = content.split("TARGETS", 1)[1]
+        targets = re.findall(r"\b0\.\d{3,}\b", target_section)
+    except:
+        targets = []
 
     if not all([symbol_match, buyzone_match, targets, stop_match, lev_match]):
         print("⚠️ Missing data — skipping")
@@ -106,7 +104,9 @@ async def on_message(message):
     leverage = int(lev_match.group(1))
 
     market_price = get_market_price(symbol)
-    print(f"📊 {symbol} Market Price: {market_price}")
+
+    # Debug output to verify parsing
+    print(f"🧪 Parsed: symbol={symbol}, market={market_price}, buyzone=({buy_low}–{buy_high}), stop={sl_price}, leverage={leverage}, TP={tp_list}")
 
     if market_price and buy_low <= market_price <= buy_high:
         size = round((TRADE_AMOUNT * leverage) / market_price, 3)
@@ -116,6 +116,6 @@ async def on_message(message):
         else:
             await message.channel.send(f"❌ Trade Failed: {order}")
     else:
-        await message.channel.send(f"⏳ {symbol} not in BUYZONE ({buy_low} - {buy_high})")
+        await message.channel.send(f"⏳ {symbol} not in BUYZONE ({buy_low} - {buy_high}) | Live: {market_price}")
 
 client.run(DISCORD_TOKEN)
