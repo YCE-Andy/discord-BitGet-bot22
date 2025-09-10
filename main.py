@@ -1,126 +1,130 @@
-from dotenv import load_dotenv
 import os
 import discord
-import re
+import requests
 import time
 import hmac
 import hashlib
-import requests
 import json
+from decimal import Decimal
+from discord.ext import commands
 
-# Load environment variables
-load_dotenv()
-DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID"))
+# === CONFIG ===
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID"))
 BLOFIN_API_KEY = os.getenv("BLOFIN_API_KEY")
-BLOFIN_API_SECRET = os.getenv("BLOFIN_API_SECRET")
-TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT"))  # in USDT
+BLOFIN_SECRET_KEY = os.getenv("BLOFIN_SECRET_KEY")
+BLOFIN_PASSPHRASE = os.getenv("BLOFIN_PASSPHRASE")
+TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", 100))  # Base USDT amount
+BLOFIN_BASE_URL = "https://api.blofin.com"
 
-intents = discord.Intents.default()
-intents.message_content = True
-client = discord.Client(intents=intents)
-
-# Signature function for BloFin
-
-def sign_blofin_request(api_secret, timestamp, method, path, body=''):
-    payload = f"{timestamp}{method.upper()}{path}{body}"
-    return hmac.new(api_secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
-
-# Place a market order on BloFin
-
-def place_order(symbol, size, leverage, tp_price, sl_price):
-    url_path = "/api/v1/trade/order"
-    full_url = f"https://api.blofin.com{url_path}"
+# === HEADERS GENERATOR ===
+def generate_headers(method, path, body=""):
     timestamp = str(int(time.time() * 1000))
-
-    body = {
-        "instId": symbol,
-        "marginMode": "isolated",
-        "positionSide": "net",
-        "side": "buy",
-        "orderType": "market",
-        "price": "",  # Not used for market orders
-        "size": str(size),
-        "reduceOnly": False,
-        "tpTriggerPrice": str(tp_price),
-        "tpOrderPrice": "-1",
-        "slTriggerPrice": str(sl_price),
-        "slOrderPrice": "-1",
-        "clientOrderId": str(timestamp)
+    body_str = json.dumps(body) if isinstance(body, dict) else body
+    prehash = f"{timestamp}{method.upper()}{path}{body_str}"
+    signature = hmac.new(
+        BLOFIN_SECRET_KEY.encode(), prehash.encode(), hashlib.sha256
+    ).hexdigest()
+    return {
+        "ACCESS-KEY": BLOFIN_API_KEY,
+        "ACCESS-SIGN": signature,
+        "ACCESS-TIMESTAMP": timestamp,
+        "ACCESS-PASSPHRASE": BLOFIN_PASSPHRASE,
+        "Content-Type": "application/json",
     }
 
-    body_str = json.dumps(body)
-    signature = sign_blofin_request(BLOFIN_API_SECRET, timestamp, "POST", url_path, body_str)
-
-    headers = {
-        "ApiKey": BLOFIN_API_KEY,
-        "Request-Time": timestamp,
-        "Signature": signature,
-        "Content-Type": "application/json"
-    }
-
+# === PLACE TRADE ===
+def place_trade(symbol, side, leverage, tp=None, sl=None):
     try:
-        r = requests.post(full_url, headers=headers, data=body_str)
-        r.raise_for_status()
-        return r.json()
+        # Fetch latest market price
+        market_res = requests.get(f"{BLOFIN_BASE_URL}/api/v1/market/ticker?instId={symbol}-PERP")
+        market_data = market_res.json()
+        price = float(market_data["data"]["last"])
+        size = round((TRADE_AMOUNT * leverage) / price, 4)
+
+        body = {
+            "instId": f"{symbol}-PERP",
+            "marginMode": "isolated",
+            "positionSide": "net",
+            "side": side.lower(),
+            "orderType": "market",
+            "size": str(size)
+        }
+
+        if tp:
+            body["tpTriggerPrice"] = str(tp)
+            body["tpOrderPrice"] = "-1"
+        if sl:
+            body["slTriggerPrice"] = str(sl)
+            body["slOrderPrice"] = "-1"
+
+        headers = generate_headers("POST", "/api/v1/trade/order", body)
+        response = requests.post(f"{BLOFIN_BASE_URL}/api/v1/trade/order", headers=headers, data=json.dumps(body))
+
+        if response.status_code == 200:
+            return f"✅ Trade placed for {symbol} | Side: {side.upper()} | Size: {size} @ {price}"
+        else:
+            return f"❌ Trade Failed: {response.text}"
     except Exception as e:
-        return {"error": str(e)}
+        return f"❌ Exception: {str(e)}"
 
-# Parse command message from Discord
-
-def parse_trade_command(content):
+# === PARSE COMMAND ===
+def parse_trade_command(message):
     try:
-        symbol_match = re.search(r"([A-Z]+USDT)", content)
-        targets = re.findall(r"(?<=\n|\s)0\.\d{3,}(?=\n|\s|$)", content)
-        stop_match = re.search(r"STOP\s+([\d.]+)", content, re.IGNORECASE)
-        leverage_match = re.search(r"LEVERAGE\s*x?(\d+)", content, re.IGNORECASE)
+        lines = message.strip().upper().splitlines()
+        symbol = ""
+        targets = []
+        stop = None
+        leverage = 1
 
-        if not (symbol_match and targets and stop_match and leverage_match):
-            return None
+        for line in lines:
+            if line.startswith("TARGETS"):
+                targets = list(map(float, line.replace("TARGETS", "").split()))
+            elif line.startswith("STOP"):
+                stop = float(line.replace("STOP", "").strip())
+            elif line.startswith("LEVERAGE"):
+                leverage = int(line.replace("LEVERAGE", "").replace("X", "").strip())
+            elif line and not line.startswith(("TARGETS", "STOP", "LEVERAGE")):
+                symbol = line.replace("/USDT", "").replace("-PERP", "").strip()
 
-        symbol = symbol_match.group(1)
-        tp_price = float(targets[0])  # Use first TP
-        sl_price = float(stop_match.group(1))
-        leverage = int(leverage_match.group(1))
-
-        size = round((TRADE_AMOUNT * leverage) / tp_price, 3)
+        if not symbol or not targets or not stop or not leverage:
+            return None, "⚠️ Could not parse trade command."
 
         return {
             "symbol": symbol,
-            "tp": tp_price,
-            "sl": sl_price,
-            "lev": leverage,
-            "size": size
-        }
-    except:
-        return None
+            "targets": targets,
+            "stop": stop,
+            "leverage": leverage
+        }, None
+    except Exception as e:
+        return None, f"⚠️ Parse error: {str(e)}"
 
-@client.event
+# === BOT SETUP ===
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+@bot.event
 async def on_ready():
-    print(f"✅ Logged in as {client.user}")
+    print(f"🤖 Logged in as {bot.user}")
 
-@client.event
+@bot.event
 async def on_message(message):
-    if message.channel.id != DISCORD_CHANNEL_ID or message.author == client.user:
+    if message.channel.id != CHANNEL_ID or message.author == bot.user:
         return
 
-    trade_data = parse_trade_command(message.content)
-
-    if not trade_data:
-        await message.channel.send("⚠️ Could not parse trade command.")
+    parsed, error = parse_trade_command(message.content)
+    if error:
+        await message.channel.send(error)
         return
 
-    result = place_order(
-        trade_data["symbol"],
-        trade_data["size"],
-        trade_data["lev"],
-        trade_data["tp"],
-        trade_data["sl"]
-    )
+    symbol = parsed["symbol"]
+    leverage = parsed["leverage"]
+    tp = parsed["targets"][0] if parsed["targets"] else None
+    sl = parsed["stop"]
+    side = "buy"  # Default to long, could add parsing for SELL later
 
-    if result.get("code") == "0":
-        await message.channel.send(f"✅ Trade Placed: {trade_data['symbol']} TP: {trade_data['tp']} SL: {trade_data['sl']}")
-    else:
-        await message.channel.send(f"❌ Trade Failed: {result}")
+    result = place_trade(symbol, side, leverage, tp, sl)
+    await message.channel.send(result)
 
-client.run(DISCORD_TOKEN)
+bot.run(DISCORD_TOKEN)
