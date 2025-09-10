@@ -16,6 +16,7 @@ BLOFIN_API_KEY = os.getenv("BLOFIN_API_KEY")
 BLOFIN_API_SECRET = os.getenv("BLOFIN_API_SECRET")
 TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT"))  # e.g. 500
 LEVERAGE = int(os.getenv("LEVERAGE"))  # e.g. 10
+FALLBACK_PRICE = 1.0  # Used to calculate size if no price is fetched
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -87,22 +88,12 @@ async def on_message(message):
     sl_price = float(stop_match.group(1))
     leverage = int(lev_match.group(1))
 
-    # Use current market price to calculate size
-    price_url = f"https://api.blofin.com/api/v1/market/ticker?symbol={symbol}"
-    price_response = requests.get(price_url)
-    try:
-        market_price = float(price_response.json()["data"]["lastPrice"])
-    except:
-        await message.channel.send(f"❌ Couldn't fetch market price for {symbol}")
-        return
+    # ✅ No market price check — just use fallback to calculate position size
+    size = round((TRADE_AMOUNT * leverage) / FALLBACK_PRICE, 3)
 
-    # Calculate size
-    size = round((TRADE_AMOUNT * leverage) / market_price, 3)
-
-    # Place trade
     order = place_order(symbol, 1, size, leverage, tp_price, sl_price)
     if order.get("code") == "0":
-        await message.channel.send(f"✅ Trade Placed: {symbol} @ {market_price:.5f}")
+        await message.channel.send(f"✅ Trade Placed: {symbol} | Size: {size} | Lev: x{leverage}")
     else:
         await message.channel.send(f"❌ Trade Failed: {order}")
 
