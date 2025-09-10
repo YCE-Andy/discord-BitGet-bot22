@@ -12,11 +12,10 @@ import json
 load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID"))
+
 BLOFIN_API_KEY = os.getenv("BLOFIN_API_KEY")
 BLOFIN_API_SECRET = os.getenv("BLOFIN_API_SECRET")
-TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT"))  # e.g. 500
-LEVERAGE = int(os.getenv("LEVERAGE"))  # e.g. 10
-FALLBACK_PRICE = 1.0  # Used to calculate size if no price is fetched
+TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT"))
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -33,11 +32,11 @@ def place_order(symbol, side, size, leverage, tp_price, sl_price):
 
     body = {
         "symbol": symbol,
-        "price": "",  # market order
+        "price": "",
         "vol": size,
         "side": side,  # 1 = buy
-        "type": 1,     # 1 = market order
-        "open_type": 1,  # isolated margin
+        "type": 1,     # 1 = market
+        "open_type": 1,
         "position_id": 0,
         "leverage": leverage,
         "external_oid": str(timestamp),
@@ -57,13 +56,17 @@ def place_order(symbol, side, size, leverage, tp_price, sl_price):
         "Content-Type": "application/json"
     }
 
-    r = requests.post(full_url, headers=headers, data=body_str)
-    print(f"📤 Trade response: {r.status_code} - {r.text}")
-    return r.json()
+    try:
+        r = requests.post(full_url, headers=headers, data=body_str)
+        print(f"📤 Trade Request: {r.status_code} - {r.text}")
+        return r.json()
+    except Exception as e:
+        print(f"💥 Trade Exception: {e}")
+        return {"code": "-1", "msg": str(e)}
 
 @client.event
 async def on_ready():
-    print(f"✅ Bot connected as {client.user}")
+    print(f"✅ Logged in as {client.user}")
 
 @client.event
 async def on_message(message):
@@ -71,30 +74,27 @@ async def on_message(message):
         return
 
     content = message.content
-    print(f"📩 Message received: {content}")
-
     symbol_match = re.search(r"([A-Z]+USDT)", content)
-    buyzone_match = re.search(r"BUYZONE\s+([\d.]+)\s*-\s*([\d.]+)", content)
     targets = re.findall(r"\b0\.\d{3,}\b", content)
     stop_match = re.search(r"Stop\s+([\d.]+)", content)
     lev_match = re.search(r"Leverage\s*x?(\d+)", content)
 
-    if not all([symbol_match, buyzone_match, targets, stop_match, lev_match]):
-        await message.channel.send("⚠️ Incomplete message format — skipping.")
+    if not all([symbol_match, targets, stop_match, lev_match]):
+        await message.channel.send("⚠️ Missing trade data.")
         return
 
     symbol = symbol_match.group(1)
-    tp_price = float(targets[0]) if targets else None
+    tp_price = float(targets[0])
     sl_price = float(stop_match.group(1))
     leverage = int(lev_match.group(1))
 
-    # ✅ No market price check — just use fallback to calculate position size
-    size = round((TRADE_AMOUNT * leverage) / FALLBACK_PRICE, 3)
+    size = round((TRADE_AMOUNT * leverage) / tp_price, 3)
 
     order = place_order(symbol, 1, size, leverage, tp_price, sl_price)
+
     if order.get("code") == "0":
-        await message.channel.send(f"✅ Trade Placed: {symbol} | Size: {size} | Lev: x{leverage}")
+        await message.channel.send(f"✅ Trade Placed for {symbol} | Size: {size}")
     else:
-        await message.channel.send(f"❌ Trade Failed: {order}")
+        await message.channel.send(f"❌ Trade Failed: {order.get('msg', 'Unknown error')}")
 
 client.run(DISCORD_TOKEN)
