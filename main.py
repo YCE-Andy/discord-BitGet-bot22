@@ -1,169 +1,113 @@
+from dotenv import load_dotenv
 import os
+import discord
+import re
 import time
 import hmac
-import json
 import hashlib
-import base64
 import requests
-import discord
-import asyncio
+import json
 
-# Load environment variables
-DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-ALERT_CHANNEL_ID = int(os.getenv("ALERT_CHANNEL_ID"))
+# Load env vars
+load_dotenv()
+DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID"))
 
-BITGET_API_KEY = os.getenv("BITGET_API_KEY")
-BITGET_SECRET_KEY = os.getenv("BITGET_SECRET_KEY")
-BITGET_PASSPHRASE = os.getenv("BITGET_PASSPHRASE")
+BLOFIN_API_KEY = os.getenv("BLOFIN_API_KEY")
+BLOFIN_API_SECRET = os.getenv("BLOFIN_API_SECRET")
+TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT"))
+LEVERAGE = int(os.getenv("LEVERAGE"))
 
-TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", "200"))
-DEFAULT_LEVERAGE = int(os.getenv("LEVERAGE", "5"))
-
-BITGET_API_URL = "https://api.bitget.com"
-
-# Discord client setup
 intents = discord.Intents.default()
-intents.messages = True
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-# Signature generator
-def generate_signature(timestamp, method, request_path, body):
-    pre_hash = f"{timestamp}{method.upper()}{request_path}{body}"
-    hmac_digest = hmac.new(
-        BITGET_SECRET_KEY.encode(),
-        pre_hash.encode(),
-        hashlib.sha256
-    ).digest()
-    return base64.b64encode(hmac_digest).decode()
+def sign_blofin_request(api_secret, timestamp, method, path, body=''):
+    payload = f"{timestamp}{method.upper()}{path}{body}"
+    return hmac.new(api_secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
-# Auth headers
-def generate_auth_headers(method, path, body_dict, timestamp):
-    body = json.dumps(body_dict) if body_dict else ""
-    sign = generate_signature(timestamp, method, path, body)
-    return {
-        "ACCESS-KEY": BITGET_API_KEY,
-        "ACCESS-SIGN": sign,
-        "ACCESS-TIMESTAMP": timestamp,
-        "ACCESS-PASSPHRASE": BITGET_PASSPHRASE,
+def get_market_price(symbol):
+    url = f"https://api.blofin.com/api/v1/market/ticker?symbol={symbol}"
+    r = requests.get(url)
+    data = r.json()
+    try:
+        return float(data["data"]["lastPrice"])
+    except:
+        return None
+
+def place_order(symbol, side, size, leverage, tp_list, sl_price):
+    url = "/api/v1/trade/order"
+    full_url = f"https://api.blofin.com{url}"
+    timestamp = str(int(time.time() * 1000))
+
+    body = {
+        "symbol": symbol,
+        "price": "",
+        "vol": size,
+        "side": side,  # 1 = buy
+        "type": 1,     # 1 = market
+        "open_type": 1,
+        "position_id": 0,
+        "leverage": leverage,
+        "external_oid": str(timestamp),
+        "stop_loss_price": sl_price,
+        "take_profit_price": tp_list[0] if tp_list else "",
+        "position_mode": 1,
+        "reduce_only": False
+    }
+
+    body_str = json.dumps(body)
+    signature = sign_blofin_request(BLOFIN_API_SECRET, timestamp, "POST", url, body_str)
+
+    headers = {
+        "ApiKey": BLOFIN_API_KEY,
+        "Request-Time": timestamp,
+        "Signature": signature,
         "Content-Type": "application/json"
     }
 
-# Place market order
-def place_futures_order(symbol, side, quantity, leverage):
-    path = "/api/v2/mix/order/place-order"
-    url = BITGET_API_URL + path
-    body = {
-        "symbol": symbol,
-        "marginCoin": "USDT",
-        "side": side,
-        "orderType": "market",
-        "size": str(quantity),
-        "leverage": str(leverage),
-        "productType": "umcbl",
-        "marginMode": "isolated"
-    }
-    headers = generate_auth_headers("POST", path, body, str(int(time.time() * 1000)))
+    r = requests.post(full_url, headers=headers, data=body_str)
+    print(f"Trade response: {r.status_code} - {r.text}")
+    return r.json()
 
-    try:
-        response = requests.post(url, headers=headers, json=body)
-        return response.json()
-    except Exception as e:
-        return {"error": str(e)}
-
-# Place plan order (TP/SL)
-def place_plan_order(symbol, trigger_price, side, quantity, plan_type):
-    path = "/api/v2/mix/order/place-plan-order"
-    url = BITGET_API_URL + path
-    body = {
-        "symbol": symbol,
-        "marginCoin": "USDT",
-        "size": str(quantity),
-        "side": side,
-        "triggerPrice": str(trigger_price),
-        "triggerType": "market_price",
-        "planType": plan_type,
-        "orderType": "market"
-    }
-    headers = generate_auth_headers("POST", path, body, str(int(time.time() * 1000)))
-
-    try:
-        response = requests.post(url, headers=headers, json=body)
-        return response.json()
-    except Exception as e:
-        return {"error": str(e)}
-
-# Discord bot events
 @client.event
 async def on_ready():
     print(f"✅ Logged in as {client.user}")
 
 @client.event
 async def on_message(message):
-    if message.author.bot or message.channel.id != ALERT_CHANNEL_ID:
+    if message.channel.id != DISCORD_CHANNEL_ID or message.author == client.user:
         return
 
-    content = message.content.upper()
-    if "BUYZONE" in content and "TARGETS" in content and "STOP" in content:
-        await message.channel.send("🟨 Signal received")
-        try:
-            parts = content.split()
-            raw_symbol = parts[0].replace("PERP", "").replace("USDT", "")
-            symbol = f"{raw_symbol}USDT"
+    content = message.content
+    symbol_match = re.search(r"([A-Z]+USDT)", content)
+    buyzone_match = re.search(r"BUYZONE\s+([\d.]+)\s*-\s*([\d.]+)", content)
+    targets = re.findall(r"\b0\.\d{3,}\b", content)
+    stop_match = re.search(r"Stop\s+([\d.]+)", content)
+    lev_match = re.search(r"Leverage\s*x?(\d+)", content)
 
-            side = "buy"
-            if "SHORT" in parts[0] or "(SHORT)" in content:
-                side = "sell"
+    if not all([symbol_match, buyzone_match, targets, stop_match, lev_match]):
+        print("⚠️ Missing data — skipping")
+        return
 
-            leverage = DEFAULT_LEVERAGE
-            if "LEVERAGE" in parts:
-                i = parts.index("LEVERAGE")
-                try:
-                    leverage = int(parts[i + 1].replace("X", ""))
-                except:
-                    pass
+    symbol = symbol_match.group(1)
+    buy_low = float(buyzone_match.group(1))
+    buy_high = float(buyzone_match.group(2))
+    tp_list = [float(t) for t in targets if float(t) > buy_high]
+    sl_price = float(stop_match.group(1))
+    leverage = int(lev_match.group(1))
 
-            i = parts.index("BUYZONE")
-            entry_low = float(parts[i + 1].replace(",", "").replace("–", "-"))
-            entry_high = float(parts[i + 3] if parts[i + 2] == "-" else parts[i + 2])
-            entry_price = (entry_low + entry_high) / 2
-            quantity = round(TRADE_AMOUNT / entry_price, 3)
+    market_price = get_market_price(symbol)
+    print(f"{symbol} Market Price: {market_price}")
 
-            await message.channel.send(f"📈 Direction: {'LONG' if side == 'buy' else 'SHORT'}")
-            await message.channel.send(f"⚙️ Leverage: x{leverage}")
-            await message.channel.send(f"💰 Entry: {entry_price}")
-            await message.channel.send(f"📦 Size: {quantity}")
+    if market_price and buy_low <= market_price <= buy_high:
+        size = round((TRADE_AMOUNT * leverage) / market_price, 3)
+        order = place_order(symbol, 1, size, leverage, tp_list, sl_price)
+        if order.get("code") == "0":
+            await message.channel.send(f"✅ Trade Placed: {symbol} | Entry: {market_price:.5f}")
+        else:
+            await message.channel.send(f"❌ Trade Failed: {order}")
+    else:
+        await message.channel.send(f"⏳ {symbol} not in BUYZONE ({buy_low} - {buy_high})")
 
-            result = place_futures_order(symbol, side, quantity, leverage)
-            if result.get("code") == "00000":
-                await message.channel.send(f"✅ Bitget Order Placed: {symbol} x{leverage} [{side.upper()}]")
-            else:
-                await message.channel.send(f"❌ Trade Failed: {result}")
-                return
-
-            # Parse targets
-            i = parts.index("TARGETS")
-            targets = []
-            for j in range(i + 1, len(parts)):
-                try:
-                    if parts[j] == "STOP":
-                        break
-                    targets.append(float(parts[j]))
-                except:
-                    break
-
-            stop = float(parts[parts.index("STOP") + 1])
-            sizes = [0.5, 0.2, 0.15, 0.1, 0.05]
-
-            for i in range(min(5, len(targets))):
-                tp_result = place_plan_order(symbol, targets[i], "sell" if side == "buy" else "buy", round(quantity * sizes[i], 3), "profit_plan")
-                await message.channel.send(f"📈 TP @{targets[i]}: {tp_result}")
-
-            sl_result = place_plan_order(symbol, stop, "sell" if side == "buy" else "buy", quantity, "loss_plan")
-            await message.channel.send(f"🛑 SL @{stop}: {sl_result}")
-
-        except Exception as e:
-            await message.channel.send(f"⚠️ Error: {str(e)}")
-
-# Start bot
-client.run(DISCORD_BOT_TOKEN)
+client.run(DISCORD_TOKEN)
