@@ -8,36 +8,37 @@ import hashlib
 import requests
 import json
 
-# Load env vars
+# Load environment variables
 load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID"))
 
 BLOFIN_API_KEY = os.getenv("BLOFIN_API_KEY")
 BLOFIN_API_SECRET = os.getenv("BLOFIN_API_SECRET")
-TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT"))
-LEVERAGE = int(os.getenv("LEVERAGE"))
+TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT"))  # e.g. 500
+LEVERAGE = int(os.getenv("LEVERAGE"))  # Default leverage fallback if not parsed
 
+# Set Discord intents
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-# 🔐 Sign BloFin API requests
+# Signature for Blofin API
 def sign_blofin_request(api_secret, timestamp, method, path, body=''):
     payload = f"{timestamp}{method.upper()}{path}{body}"
     return hmac.new(api_secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
-# 📈 Get live market price from BloFin
+# Get latest market price
 def get_market_price(symbol):
     url = f"https://api.blofin.com/api/v1/market/ticker?symbol={symbol}"
-    r = requests.get(url)
-    data = r.json()
     try:
+        r = requests.get(url)
+        data = r.json()
         return float(data["data"]["lastPrice"])
     except:
         return None
 
-# 🧾 Place a market order with TP & SL
+# Place a market order
 def place_order(symbol, side, size, leverage, tp_list, sl_price):
     url = "/api/v1/trade/order"
     full_url = f"https://api.blofin.com{url}"
@@ -45,11 +46,11 @@ def place_order(symbol, side, size, leverage, tp_list, sl_price):
 
     body = {
         "symbol": symbol,
-        "price": "",                 # Market order
+        "price": "",
         "vol": size,
-        "side": side,               # 1 = Buy
-        "type": 1,                  # 1 = Market
-        "open_type": 1,            # Isolated margin
+        "side": side,
+        "type": 1,
+        "open_type": 1,
         "position_id": 0,
         "leverage": leverage,
         "external_oid": str(timestamp),
@@ -70,15 +71,15 @@ def place_order(symbol, side, size, leverage, tp_list, sl_price):
     }
 
     r = requests.post(full_url, headers=headers, data=body_str)
-    print(f"📤 Trade response: {r.status_code} - {r.text}")
+    print(f"Trade response: {r.status_code} - {r.text}")
     return r.json()
 
-# 🚀 Bot online
+# Bot is ready
 @client.event
 async def on_ready():
     print(f"✅ Logged in as {client.user}")
 
-# 💬 Message received handler
+# Message received
 @client.event
 async def on_message(message):
     if message.channel.id != DISCORD_CHANNEL_ID or message.author == client.user:
@@ -109,7 +110,6 @@ async def on_message(message):
 
     if market_price and buy_low <= market_price <= buy_high:
         size = round((TRADE_AMOUNT * leverage) / market_price, 3)
-        print(f"📈 Placing order: {symbol}, Size: {size}, Leverage: {leverage}, SL: {sl_price}, TP: {tp_list[0] if tp_list else 'N/A'}")
         order = place_order(symbol, 1, size, leverage, tp_list, sl_price)
         if order.get("code") == "0":
             await message.channel.send(f"✅ Trade Placed: {symbol} | Entry: {market_price:.5f}")
@@ -118,5 +118,4 @@ async def on_message(message):
     else:
         await message.channel.send(f"⏳ {symbol} not in BUYZONE ({buy_low} - {buy_high})")
 
-# 🚦 Run bot
 client.run(DISCORD_TOKEN)
