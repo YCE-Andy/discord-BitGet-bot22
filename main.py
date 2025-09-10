@@ -1,14 +1,14 @@
-from dotenv import load_dotenv
 import os
-import discord
 import re
 import time
+import json
 import hmac
 import hashlib
 import requests
-import json
+import discord
+from dotenv import load_dotenv
 
-# Load env vars
+# Load environment variables
 load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID"))
@@ -27,19 +27,15 @@ def sign_blofin_request(api_secret, timestamp, method, path, body=''):
     return hmac.new(api_secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
 def get_market_price(symbol):
-    symbol = symbol + "-SWAP"  # BloFin expects full contract name
     url = f"https://api.blofin.com/api/v1/market/ticker?symbol={symbol}"
     try:
         r = requests.get(url)
-        print(f"DEBUG: Raw BloFin response: {r.text}")
         data = r.json()
         return float(data["data"]["lastPrice"])
-    except Exception as e:
-        print(f"ERROR in get_market_price: {e}")
+    except:
         return None
 
 def place_order(symbol, side, size, leverage, tp_list, sl_price):
-    symbol = symbol + "-SWAP"
     url = "/api/v1/trade/order"
     full_url = f"https://api.blofin.com{url}"
     timestamp = str(int(time.time() * 1000))
@@ -48,8 +44,8 @@ def place_order(symbol, side, size, leverage, tp_list, sl_price):
         "symbol": symbol,
         "price": "",
         "vol": size,
-        "side": side,  # 1 = buy
-        "type": 1,     # 1 = market
+        "side": side,
+        "type": 1,
         "open_type": 1,
         "position_id": 0,
         "leverage": leverage,
@@ -104,7 +100,7 @@ async def on_message(message):
     market_price = get_market_price(symbol)
     print(f"{symbol} Market Price: {market_price}")
 
-    if market_price and buy_low <= market_price <= buy_high:
+    if market_price:
         size = round((TRADE_AMOUNT * leverage) / market_price, 3)
         order = place_order(symbol, 1, size, leverage, tp_list, sl_price)
         if order.get("code") == "0":
@@ -112,6 +108,6 @@ async def on_message(message):
         else:
             await message.channel.send(f"❌ Trade Failed: {order}")
     else:
-        await message.channel.send(f"⏳ {symbol} not in BUYZONE ({buy_low} - {buy_high})")
+        await message.channel.send(f"❌ Couldn't fetch market price for {symbol}")
 
 client.run(DISCORD_TOKEN)
