@@ -1,14 +1,14 @@
+from dotenv import load_dotenv
 import os
+import discord
 import re
 import time
-import json
 import hmac
 import hashlib
 import requests
-import discord
-from dotenv import load_dotenv
+import json
 
-# Load environment variables
+# Load env vars
 load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID"))
@@ -26,16 +26,7 @@ def sign_blofin_request(api_secret, timestamp, method, path, body=''):
     payload = f"{timestamp}{method.upper()}{path}{body}"
     return hmac.new(api_secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
-def get_market_price(symbol):
-    url = f"https://api.blofin.com/api/v1/market/ticker?symbol={symbol}"
-    try:
-        r = requests.get(url)
-        data = r.json()
-        return float(data["data"]["lastPrice"])
-    except:
-        return None
-
-def place_order(symbol, side, size, leverage, tp_list, sl_price):
+def place_order(symbol, side, size, leverage, tp_price, sl_price):
     url = "/api/v1/trade/order"
     full_url = f"https://api.blofin.com{url}"
     timestamp = str(int(time.time() * 1000))
@@ -44,14 +35,14 @@ def place_order(symbol, side, size, leverage, tp_list, sl_price):
         "symbol": symbol,
         "price": "",
         "vol": size,
-        "side": side,
-        "type": 1,
+        "side": side,  # 1 = buy
+        "type": 1,     # 1 = market
         "open_type": 1,
         "position_id": 0,
         "leverage": leverage,
         "external_oid": str(timestamp),
         "stop_loss_price": sl_price,
-        "take_profit_price": tp_list[0] if tp_list else "",
+        "take_profit_price": tp_price,
         "position_mode": 1,
         "reduce_only": False
     }
@@ -80,6 +71,8 @@ async def on_message(message):
         return
 
     content = message.content
+    print(f"📩 Message received: {content}")
+
     symbol_match = re.search(r"([A-Z]+USDT)", content)
     buyzone_match = re.search(r"BUYZONE\s+([\d.]+)\s*-\s*([\d.]+)", content)
     targets = re.findall(r"\b0\.\d{3,}\b", content)
@@ -97,17 +90,13 @@ async def on_message(message):
     sl_price = float(stop_match.group(1))
     leverage = int(lev_match.group(1))
 
-    market_price = get_market_price(symbol)
-    print(f"{symbol} Market Price: {market_price}")
+    # Skip market price lookup, just use high end of buyzone to calculate position size
+    size = round((TRADE_AMOUNT * leverage) / buy_high, 3)
 
-    if market_price:
-        size = round((TRADE_AMOUNT * leverage) / market_price, 3)
-        order = place_order(symbol, 1, size, leverage, tp_list, sl_price)
-        if order.get("code") == "0":
-            await message.channel.send(f"✅ Trade Placed: {symbol} | Entry: {market_price:.5f}")
-        else:
-            await message.channel.send(f"❌ Trade Failed: {order}")
+    order = place_order(symbol, 1, size, leverage, tp_list[0] if tp_list else "", sl_price)
+    if order.get("code") == "0":
+        await message.channel.send(f"✅ Trade Placed: {symbol} | Size: {size} | Leverage: {leverage}x")
     else:
-        await message.channel.send(f"❌ Couldn't fetch market price for {symbol}")
+        await message.channel.send(f"❌ Trade Failed: {order}")
 
 client.run(DISCORD_TOKEN)
