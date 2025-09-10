@@ -73,6 +73,7 @@ def place_order(symbol, side, size, leverage, tp_list, sl_price):
 @client.event
 async def on_ready():
     print(f"✅ Logged in as {client.user}")
+        print(f"📩 Message received: {message.content}")
 
 @client.event
 async def on_message(message):
