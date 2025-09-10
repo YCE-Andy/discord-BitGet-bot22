@@ -1,22 +1,21 @@
-from dotenv import load_dotenv
 import os
-import discord
-import re
 import time
 import hmac
 import hashlib
 import requests
 import json
+import discord
+import re
+from dotenv import load_dotenv
 
-# Load env vars
+# Load environment variables
 load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID"))
-
 BLOFIN_API_KEY = os.getenv("BLOFIN_API_KEY")
 BLOFIN_API_SECRET = os.getenv("BLOFIN_API_SECRET")
-TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT"))
-LEVERAGE = int(os.getenv("LEVERAGE"))
+TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT"))  # e.g. 500
+LEVERAGE = int(os.getenv("LEVERAGE"))            # e.g. 10
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -33,7 +32,7 @@ def place_order(symbol, side, size, leverage, tp_price, sl_price):
 
     body = {
         "symbol": symbol,
-        "price": "",
+        "price": "",  # Market order
         "vol": size,
         "side": side,  # 1 = buy
         "type": 1,     # 1 = market
@@ -67,15 +66,13 @@ async def on_ready():
 
 @client.event
 async def on_message(message):
-    if message.channel.id != DISCORD_CHANNEL_ID or message.author == client.user:
+    if message.author == client.user or message.channel.id != DISCORD_CHANNEL_ID:
         return
 
     content = message.content
-    print(f"📩 Message received: {content}")
-
     symbol_match = re.search(r"([A-Z]+USDT)", content)
     buyzone_match = re.search(r"BUYZONE\s+([\d.]+)\s*-\s*([\d.]+)", content)
-    targets = re.findall(r"\b0\.\d{3,}\b", content)
+    targets = re.findall(r"(?<=\n)0\.\d{3,}", content)
     stop_match = re.search(r"Stop\s+([\d.]+)", content)
     lev_match = re.search(r"Leverage\s*x?(\d+)", content)
 
@@ -84,18 +81,18 @@ async def on_message(message):
         return
 
     symbol = symbol_match.group(1)
-    buy_low = float(buyzone_match.group(1))
-    buy_high = float(buyzone_match.group(2))
-    tp_list = [float(t) for t in targets if float(t) > buy_high]
+    tp_price = float(targets[0]) if targets else ""
     sl_price = float(stop_match.group(1))
     leverage = int(lev_match.group(1))
 
-    # Skip market price lookup, just use high end of buyzone to calculate position size
+    # Use buyzone high as reference
+    buy_high = float(buyzone_match.group(2))
     size = round((TRADE_AMOUNT * leverage) / buy_high, 3)
 
-    order = place_order(symbol, 1, size, leverage, tp_list[0] if tp_list else "", sl_price)
+    order = place_order(symbol, 1, size, leverage, tp_price, sl_price)
+
     if order.get("code") == "0":
-        await message.channel.send(f"✅ Trade Placed: {symbol} | Size: {size} | Leverage: {leverage}x")
+        await message.channel.send(f"✅ Trade Placed: {symbol} | Size: {size} | SL: {sl_price} | TP: {tp_price}")
     else:
         await message.channel.send(f"❌ Trade Failed: {order}")
 
