@@ -1,107 +1,113 @@
+from dotenv import load_dotenv
 import os
+import discord
+import re
 import time
 import hmac
 import hashlib
 import requests
-import discord
-import re
-from dotenv import load_dotenv
-from discord.ext import commands
+import json
 
+# Load env vars
 load_dotenv()
-
-# Load environment variables
-API_KEY = os.getenv("BITGET_API_KEY")
-SECRET_KEY = os.getenv("BITGET_SECRET_KEY")
-PASSPHRASE = os.getenv("BITGET_PASSPHRASE")
-TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", 500))
-LEVERAGE = int(os.getenv("LEVERAGE", 10))
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID"))
 
-# Discord bot setup
+BLOFIN_API_KEY = os.getenv("BLOFIN_API_KEY")
+BLOFIN_API_SECRET = os.getenv("BLOFIN_API_SECRET")
+TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT"))
+LEVERAGE = int(os.getenv("LEVERAGE"))
+
 intents = discord.Intents.default()
-bot = commands.Bot(command_prefix="!", intents=intents)
+intents.message_content = True
+client = discord.Client(intents=intents)
 
-# Parse trade signal message
-def parse_signal(message):
-    try:
-        symbol = re.search(r"^([A-Z]+USDT)", message).group(1)
-        buyzone = re.search(r"BUYZONE\s+(\d+\.\d+)\s*-\s*(\d+\.\d+)", message)
-        stop = re.search(r"Stop\s+(\d+\.\d+)", message)
-        
-        if symbol and buyzone and stop:
-            return {
-                "symbol": symbol.upper(),
-                "buy_low": float(buyzone.group(1)),
-                "buy_high": float(buyzone.group(2)),
-                "stop": float(stop.group(1))
-            }
-    except:
-        pass
-    return None
+def sign_blofin_request(api_secret, timestamp, method, path, body=''):
+    payload = f"{timestamp}{method.upper()}{path}{body}"
+    return hmac.new(api_secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
-# BloFin signature generator
-def sign_request(secret, timestamp, method, path, query="", body=""):
-    prehash = f"{timestamp}{method}{path}{query}{body}"
-    return hmac.new(secret.encode(), prehash.encode(), hashlib.sha256).hexdigest()
-
-# Fetch current market price for symbol
 def get_market_price(symbol):
     url = f"https://api.blofin.com/api/v1/market/ticker?symbol={symbol}"
-    res = requests.get(url)
-    data = res.json()
-    return float(data['data']['close']) if 'data' in data else None
+    r = requests.get(url)
+    data = r.json()
+    try:
+        return float(data["data"]["lastPrice"])
+    except:
+        return None
 
-# Place market order
+def place_order(symbol, side, size, leverage, tp_list, sl_price):
+    url = "/api/v1/trade/order"
+    full_url = f"https://api.blofin.com{url}"
+    timestamp = str(int(time.time() * 1000))
 
-def place_blofin_order(symbol, size, leverage):
-    ts = str(int(time.time() * 1000))
-    path = "/api/v1/order/place"
     body = {
         "symbol": symbol,
-        "price": "",  # market order
+        "price": "",
         "vol": size,
-        "side": 1,  # 1 = Buy
-        "type": 1,  # 1 = Market
-        "open_type": 1,  # 1 = Isolated
+        "side": side,  # 1 = buy
+        "type": 1,     # 1 = market
+        "open_type": 1,
         "position_id": 0,
         "leverage": leverage,
-        "external_oid": f"discord-{ts}"
+        "external_oid": str(timestamp),
+        "stop_loss_price": sl_price,
+        "take_profit_price": tp_list[0] if tp_list else "",
+        "position_mode": 1,
+        "reduce_only": False
     }
 
-    signature = sign_request(SECRET_KEY, ts, "POST", path, body=str(body).replace("'", '"'))
+    body_str = json.dumps(body)
+    signature = sign_blofin_request(BLOFIN_API_SECRET, timestamp, "POST", url, body_str)
 
     headers = {
-        "ACCESS-KEY": API_KEY,
-        "ACCESS-SIGN": signature,
-        "ACCESS-TIMESTAMP": ts,
-        "ACCESS-PASSPHRASE": PASSPHRASE,
+        "ApiKey": BLOFIN_API_KEY,
+        "Request-Time": timestamp,
+        "Signature": signature,
         "Content-Type": "application/json"
     }
 
-    res = requests.post(f"https://api.blofin.com{path}", json=body, headers=headers)
-    return res.json()
+    r = requests.post(full_url, headers=headers, data=body_str)
+    print(f"Trade response: {r.status_code} - {r.text}")
+    return r.json()
 
-@bot.event
+@client.event
 async def on_ready():
-    print(f"✅ Bot connected as {bot.user}")
+    print(f"✅ Logged in as {client.user}")
 
-@bot.event
+@client.event
 async def on_message(message):
-    if message.channel.id != DISCORD_CHANNEL_ID or message.author.bot:
+    if message.channel.id != DISCORD_CHANNEL_ID or message.author == client.user:
         return
 
-    trade = parse_signal(message.content)
-    if trade:
-        symbol = trade['symbol']
-        price = get_market_price(symbol)
+    content = message.content
+    symbol_match = re.search(r"([A-Z]+USDT)", content)
+    buyzone_match = re.search(r"BUYZONE\s+([\d.]+)\s*-\s*([\d.]+)", content)
+    targets = re.findall(r"\b0\.\d{3,}\b", content)
+    stop_match = re.search(r"Stop\s+([\d.]+)", content)
+    lev_match = re.search(r"Leverage\s*x?(\d+)", content)
 
-        if price and trade['buy_low'] <= price <= trade['buy_high']:
-            position_value = TRADE_AMOUNT
-            res = place_blofin_order(symbol, position_value, LEVERAGE)
-            await message.channel.send(f"🚀 Trade placed for {symbol} at {price} | Response: {res}")
+    if not all([symbol_match, buyzone_match, targets, stop_match, lev_match]):
+        print("⚠️ Missing data — skipping")
+        return
+
+    symbol = symbol_match.group(1)
+    buy_low = float(buyzone_match.group(1))
+    buy_high = float(buyzone_match.group(2))
+    tp_list = [float(t) for t in targets if float(t) > buy_high]
+    sl_price = float(stop_match.group(1))
+    leverage = int(lev_match.group(1))
+
+    market_price = get_market_price(symbol)
+    print(f"{symbol} Market Price: {market_price}")
+
+    if market_price and buy_low <= market_price <= buy_high:
+        size = round((TRADE_AMOUNT * leverage) / market_price, 3)
+        order = place_order(symbol, 1, size, leverage, tp_list, sl_price)
+        if order.get("code") == "0":
+            await message.channel.send(f"✅ Trade Placed: {symbol} | Entry: {market_price:.5f}")
         else:
-            await message.channel.send(f"⏳ {symbol} price {price} not in buy zone {trade['buy_low']} - {trade['buy_high']}")
+            await message.channel.send(f"❌ Trade Failed: {order}")
+    else:
+        await message.channel.send(f"⏳ {symbol} not in BUYZONE ({buy_low} - {buy_high})")
 
-bot.run(DISCORD_TOKEN)
+client.run(DISCORD_TOKEN)
