@@ -5,132 +5,133 @@ import hashlib
 import base64
 import json
 import aiohttp
-import asyncio
 import discord
 from discord.ext import commands
+from urllib.parse import urlencode
 
-# ✅ Load API credentials from environment (corrected for BloFin)
+# ✅ Load correct BloFin environment variables
 API_KEY = os.getenv("BLOFIN_API_KEY")
 API_SECRET = os.getenv("BLOFIN_API_SECRET")
 PASSPHRASE = os.getenv("BLOFIN_API_PASSPHRASE")
-
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID"))
-LEVERAGE = int(os.getenv("LEVERAGE"))
-TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT"))
+LEVERAGE = int(os.getenv("LEVERAGE", 5))
+TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", 50))
 
-API_URL = "https://api.blofin.com"
+HEADERS = {
+    "Content-Type": "application/json",
+    "X-BLOFIN-KEY": API_KEY,
+    "X-BLOFIN-PASSPHRASE": PASSPHRASE,
+}
+
+BASE_URL = "https://api.blofin.com"
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ✅ Helper to create BloFin API headers
-def generate_headers(method, path, body=""):
-    timestamp = str(int(time.time() * 1000))
-    prehash = timestamp + method + path + body
-    signature = base64.b64encode(
-        hmac.new(API_SECRET.encode(), prehash.encode(), hashlib.sha256).digest()
-    ).decode()
+# ✅ Signature generation function
+def generate_signature(timestamp, method, request_path, body=""):
+    prehash = f"{timestamp}{method}{request_path}{body}"
+    signature = hmac.new(API_SECRET.encode(), prehash.encode(), hashlib.sha256).digest()
+    return base64.b64encode(signature).decode()
 
-    return {
-        "ACCESS-KEY": API_KEY,
-        "ACCESS-SIGN": signature,
-        "ACCESS-TIMESTAMP": timestamp,
-        "ACCESS-PASSPHRASE": PASSPHRASE,
-        "Content-Type": "application/json"
-    }
-
-# ✅ Execute a market order on BloFin
-async def place_order(symbol, side, tp=None, sl=None):
+# ✅ Place trade
+async def place_trade(symbol, targets, stop, leverage):
     try:
-        # Convert symbol to BloFin format (e.g., AIUSDT → AI-USDT)
-        instId = symbol.upper().replace("USDT", "-USDT")
+        instId = symbol.upper()  # e.g., "AIUSDT"
+        side = "buy"
+        margin_mode = "isolated"
+        position_mode = "net"
+        order_type = "market"
 
-        # Get market price
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"{API_URL}/api/v1/market/ticker?instId={instId}") as resp:
-                ticker = await resp.json()
-        mark_price = float(ticker['data']['markPrice'])
+        # Use price of TP1 to calculate trade size
+        entry_price = float(targets[0])
+        size = round((TRADE_AMOUNT * leverage) / entry_price, 3)
 
-        size = round((TRADE_AMOUNT * LEVERAGE) / mark_price, 4)
+        timestamp = str(int(time.time() * 1000))
+        endpoint = "/api/v1/trade/order"
+        url = BASE_URL + endpoint
 
         payload = {
             "instId": instId,
-            "marginMode": "isolated",
-            "positionSide": "net",
+            "marginMode": margin_mode,
+            "positionSide": position_mode,
             "side": side,
-            "orderType": "market",
-            "size": str(size)
+            "orderType": order_type,
+            "size": str(size),
+            "tpTriggerPrice": str(targets[-1]),
+            "tpOrderPrice": "-1",
+            "slTriggerPrice": str(stop),
+            "slOrderPrice": "-1"
         }
 
-        if tp:
-            payload["tpTriggerPrice"] = str(tp)
-            payload["tpOrderPrice"] = "-1"
-        if sl:
-            payload["slTriggerPrice"] = str(sl)
-            payload["slOrderPrice"] = "-1"
-
         body = json.dumps(payload)
-        headers = generate_headers("POST", "/api/v1/trade/order", body)
+        signature = generate_signature(timestamp, "POST", endpoint, body)
+
+        headers = HEADERS.copy()
+        headers.update({
+            "X-BLOFIN-TIMESTAMP": timestamp,
+            "X-BLOFIN-SIGN": signature,
+        })
 
         async with aiohttp.ClientSession() as session:
-            async with session.post(f"{API_URL}/api/v1/trade/order", data=body, headers=headers) as resp:
-                res = await resp.text()
-                try:
-                    json_res = json.loads(res)
-                except json.JSONDecodeError:
-                    await notify(f"❌ Trade Failed: Invalid JSON: {res}")
-                    return
-
-                if json_res.get("code") == "0":
-                    await notify(f"✅ Trade executed: {symbol}, Side: {side}, Size: {size}")
+            async with session.post(url, headers=headers, data=body) as resp:
+                res_text = await resp.text()
+                if resp.status == 200:
+                    data = await resp.json()
+                    return f"✅ Trade placed: {data}"
                 else:
-                    await notify(f"❌ Trade Failed: {json_res}")
+                    return f"❌ Trade Failed: {res_text}"
 
     except Exception as e:
-        await notify(f"❌ Exception: {str(e)}")
+        return f"❌ Exception: {str(e)}"
 
-# ✅ Notify in Discord
-async def notify(message):
-    channel = bot.get_channel(DISCORD_CHANNEL_ID)
-    if channel:
-        await channel.send(message)
+# ✅ Parse trade message
+def parse_trade_message(msg):
+    try:
+        lines = msg.upper().splitlines()
+        symbol = None
+        targets = []
+        stop = None
+        leverage = LEVERAGE
 
-# ✅ Parse trade signal from message content
-def parse_signal(content):
-    lines = content.strip().splitlines()
-    symbol, targets, stop, lev = None, [], None, None
+        for line in lines:
+            if line.strip().endswith("USDT"):
+                symbol = line.strip()
+            elif line.startswith("TARGET"):
+                targets = [x for x in line.split() if x.replace(".", "", 1).isdigit()]
+            elif line.startswith("STOP"):
+                parts = line.split()
+                stop = parts[-1] if len(parts) > 1 else None
+            elif line.startswith("LEVERAGE"):
+                parts = line.split("X")
+                leverage = int(parts[-1]) if len(parts) > 1 else LEVERAGE
 
-    for line in lines:
-        if "TARGETS" in line.upper():
-            targets = [float(x) for x in line.upper().replace("TARGETS", "").strip().split()]
-        elif "STOP" in line.upper():
-            stop = float(line.upper().replace("STOP", "").strip())
-        elif "LEVERAGE" in line.upper():
-            lev = line.upper().replace("LEVERAGE", "").replace("X", "").strip()
-        elif line.strip().isalpha() or line.strip().endswith("USDT"):
-            symbol = line.strip().upper()
+        if symbol and targets and stop:
+            return symbol, targets, stop, leverage
+        else:
+            return None
+    except:
+        return None
 
-    if symbol and targets and stop:
-        return symbol, targets[0], stop
-    return None, None, None
-
-# ✅ Bot event
+# ✅ Discord bot listener
 @bot.event
 async def on_ready():
-    print(f"🤖 Logged in as {bot.user}")
+    print(f"✅ Logged in as {bot.user}")
 
 @bot.event
 async def on_message(message):
-    if message.author == bot.user or message.channel.id != DISCORD_CHANNEL_ID:
+    if message.channel.id != DISCORD_CHANNEL_ID or message.author == bot.user:
         return
 
-    symbol, tp, sl = parse_signal(message.content)
-    if not symbol:
-        await notify("⚠️ Could not parse trade command.")
+    parsed = parse_trade_message(message.content)
+    if not parsed:
+        await message.channel.send("⚠️ Could not parse trade command.")
         return
 
-    await place_order(symbol, "buy", tp, sl)
+    symbol, targets, stop, lev = parsed
+    response = await place_trade(symbol, targets, stop, lev)
+    await message.channel.send(response)
 
 bot.run(DISCORD_TOKEN)
